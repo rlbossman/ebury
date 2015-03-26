@@ -1,5 +1,5 @@
-putting real code behind Linux/Ebury - bad.c contains the constructor
+putting real code behind Linux/Ebury because why not
 
-not really all that weaponized but a decent chunk of the base is there
+bad.c contains the constructor
 
-	- need to mprotect() the correct (exact) memory
+
