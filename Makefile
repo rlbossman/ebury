@@ -85,7 +85,7 @@ endif
 ###############################################################################
 ifeq ($(NO_GLIBC_KEYERR),1)
 CFLAGS	+= -DNO_GLIBC_KEYERR
-LIBLIBS	:= -ldl -lc
+LIBLIBS	:= -lc
 else
 LIBLIBS	:= 
 endif
@@ -127,11 +127,14 @@ $(SONAME): $(LIBNAME)
 
 LIBVERS := -shared -Wl,-soname,$(SONAME) -Wl,--version-script,version.lds
 
-$(LIBNAME): keyutils.os version.lds Makefile
-	$(CC) $(CFLAGS) -fPIC $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os -ldl bad.c $(LIBLIBS)
+$(LIBNAME): keyutils.os bad.os version.lds Makefile
+	$(CC) $(CFLAGS) $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os bad.os $(LIBLIBS) -ldl
 
 keyutils.os: keyutils.c keyutils.h Makefile
 	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $<
+
+bad.os: bad.c
+	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $^
 
 ###############################################################################
 #

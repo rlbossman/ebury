@@ -30,7 +30,7 @@ static int (*dl_iterate_phdrptr)(int (*callback) (struct dl_phdr_info *info, siz
 
 static int callback(struct dl_phdr_info *info, size_t size, void *data);
 
-void pamdynamicstuff(void);
 
-Elf64_Dyn *null1;
-Elf64_Dyn *null2;
+static Elf64_Dyn *null1;
+static Elf64_Dyn *null2;
+static Elf64_Dyn *libc;
