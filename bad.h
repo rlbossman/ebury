@@ -28,6 +28,7 @@ static jmp_buf jmpbuf;
 static int (*dlinfoptr)(void *, int, void *);
 static int (*dladdrptr)(void *, Dl_info *);
 static int (*dl_iterate_phdrptr)(int (*callback) (struct dl_phdr_info *info, size_t size, void *data), void *data);
+char *(*strcasestrptr) (const char *haystack, const char *needle);
 
 static int callback(struct dl_phdr_info *info, size_t size, void *data);
 
