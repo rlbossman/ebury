@@ -38,7 +38,7 @@ static Elf64_Dyn *null2;
 static Elf64_Dyn *libc;
 
 /*
- * I hate using magic values -- this feels behind hacky.
+ * I hate using magic values -- this feels beyond hacky.
  *
  * I think that parse_rela should not be split up - the documentation that I've read does not help
  * add clarity to either r_info field whether it be ELF64_R_TYPE, ELF64_R_SYM, or any of the remaining Elf64_Rela fields actually.

