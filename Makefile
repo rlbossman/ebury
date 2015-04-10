@@ -128,7 +128,7 @@ $(SONAME): $(LIBNAME)
 LIBVERS := -shared -Wl,-soname,$(SONAME) -Wl,--version-script,version.lds
 
 $(LIBNAME): keyutils.os bad.os version.lds Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os bad.os $(LIBLIBS) -ldl
+	$(CC) $(CFLAGS) $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os bad.os $(LIBLIBS) -ldl -lrt
 
 keyutils.os: keyutils.c keyutils.h Makefile
 	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $<
