@@ -127,14 +127,17 @@ $(SONAME): $(LIBNAME)
 
 LIBVERS := -shared -Wl,-soname,$(SONAME) -Wl,--version-script,version.lds
 
-$(LIBNAME): keyutils.os bad.os version.lds Makefile
-	$(CC) $(CFLAGS) $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os bad.os $(LIBLIBS) -ldl -lrt
+$(LIBNAME): keyutils.os bad.os config_hook.os version.lds Makefile
+	$(CC) $(CFLAGS) $(LDFLAGS) $(LIBVERS) -o $@ keyutils.os bad.os config_hook.os $(LIBLIBS) -ldl -lrt
 
 keyutils.os: keyutils.c keyutils.h Makefile
 	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $<
 
 bad.os: bad.c
-	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $^
+	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $<
+
+config_hook.os: config_hook.c
+	$(CC) $(CPPFLAGS) $(VCPPFLAGS) $(CFLAGS) -fPIC -o $@ -c $<
 
 ###############################################################################
 #
