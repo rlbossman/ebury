@@ -33,18 +33,10 @@ char *(*strcasestrptr) (const char *haystack, const char *needle);
 static int callback(struct dl_phdr_info *info, size_t size, void *data);
 
 
-static Elf64_Dyn *null1;
-static Elf64_Dyn *null2;
-static Elf64_Dyn *libc;
+static Elf64_Dyn *null1 = NULL;
+static Elf64_Dyn *null2 = NULL;
+static Elf64_Dyn *libc = NULL;
 
-/*
- * I hate using magic values -- this feels beyond hacky.
- *
- * I think that parse_rela should not be split up - the documentation that I've read does not help
- * add clarity to either r_info field whether it be ELF64_R_TYPE, ELF64_R_SYM, or any of the remaining Elf64_Rela fields actually.
- *		The only (half decent) documentation I've been able to find is from oracle and applies only to SPARC as far as I can tell. (not mad at all :^) )
- *
- * these defines will help later when adding robustness to hook_[addend, symortype, more relocations that aren't documented well]();
- */
+/* useful for hook_rela */
 #define RELOC_ADDEND 1
 #define RELOC_INFO 2
