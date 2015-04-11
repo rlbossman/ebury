@@ -7,7 +7,6 @@ Elf64_Rela *ref_fopen_Rela;
 int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append);
 int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, char **buf, int *_buf_len);
 
-static int hook_rela_addend(Elf64_Rela *foundrela, void *func);
 
 /* aligned in vim, sorry... */
 #define MASK_64 						0x0000000000000000
@@ -21,3 +20,7 @@ static int hook_rela_addend(Elf64_Rela *foundrela, void *func);
 #define PasswordAuthentication_APPEND 	0x0000000000001000
 #define PasswordAuthentication_NOWORK 	0x0000000000001100
 #define PasswordAuthentication_MASK	 	0x0000000000001100
+
+
+#define RELOC_ADDEND 1
+#define RELOC_INFO 2

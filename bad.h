@@ -47,4 +47,4 @@ static Elf64_Dyn *libc;
  * these defines will help later when adding robustness to hook_[addend, symortype, more relocations that aren't documented well]();
  */
 #define RELOC_ADDEND 1
-#define RELOC_SYMORTYPE 2
+#define RELOC_INFO 2

