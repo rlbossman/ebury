@@ -382,8 +382,7 @@ static void  __attribute__ ((constructor)) init(void)
 	}
 
 
-
-	
+	/* find how pam is calling __syslog_chk */
 	
 	return;
 }

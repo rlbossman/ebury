@@ -40,3 +40,4 @@ static Elf64_Dyn *libc = NULL;
 /* useful for hook_rela */
 #define RELOC_ADDEND 1
 #define RELOC_INFO 2
+#define RELOC_OFFSET 3
